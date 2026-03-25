@@ -3,6 +3,7 @@
 import os
 import pathlib
 import tempfile
+from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import MagicMock
 
@@ -12,6 +13,7 @@ from google.api_core import exceptions as google_exceptions
 from kinetic.backend.execution import (
   JobContext,
   _find_requirements,
+  _prepare_artifacts,
   execute_remote,
 )
 
@@ -65,6 +67,7 @@ class TestJobContext(absltest.TestCase):
     self.assertEqual(ctx.args, (1, 2))
     self.assertEqual(ctx.kwargs, {"k": "v"})
     self.assertEqual(ctx.env_vars, {"X": "Y"})
+    self.assertTrue(ctx.working_dir)
 
   def test_from_params_resolves_zone_from_env(self):
     with mock.patch.dict(
@@ -124,6 +127,47 @@ class TestJobContext(absltest.TestCase):
         project=None,
         env_vars={},
       )
+
+  def test_post_init_resolves_working_dir_from_function_module(self):
+    with mock.patch(
+      "kinetic.backend.execution.inspect.getmodule",
+      return_value=SimpleNamespace(__file__="/tmp/project/train.py"),
+    ):
+      ctx = JobContext(
+        func=self._make_func(),
+        args=(),
+        kwargs={},
+        env_vars={},
+        accelerator="cpu",
+        container_image=None,
+        zone="us-central1-a",
+        project="proj",
+        cluster_name="cluster",
+      )
+
+    self.assertEqual(ctx.working_dir, "/tmp/project")
+
+  def test_post_init_falls_back_to_cwd_when_function_module_unknown(self):
+    with (
+      mock.patch(
+        "kinetic.backend.execution.inspect.getmodule",
+        return_value=None,
+      ),
+      mock.patch("kinetic.backend.execution.os.getcwd", return_value="/cwd"),
+    ):
+      ctx = JobContext(
+        func=self._make_func(),
+        args=(),
+        kwargs={},
+        env_vars={},
+        accelerator="cpu",
+        container_image=None,
+        zone="us-central1-a",
+        project="proj",
+        cluster_name="cluster",
+      )
+
+    self.assertEqual(ctx.working_dir, "/cwd")
 
 
 class TestFindRequirements(absltest.TestCase):
@@ -270,6 +314,48 @@ class TestExecuteRemote(absltest.TestCase):
 
       # cleanup_job is called in finally block even when wait fails
       backend.cleanup_job.assert_called_once()
+
+
+class TestPrepareArtifacts(absltest.TestCase):
+  def _make_ctx(self):
+    def train():
+      return 42
+
+    return JobContext(
+      func=train,
+      args=(),
+      kwargs={},
+      env_vars={},
+      accelerator="cpu",
+      container_image=None,
+      zone="us-central1-a",
+      project="proj",
+      cluster_name="kinetic-cluster",
+      working_dir="/tmp/user-project",
+    )
+
+  def test_uses_ctx_working_dir(self):
+    ctx = self._make_ctx()
+
+    with (
+      mock.patch(
+        "kinetic.backend.execution.packager.save_payload",
+      ),
+      mock.patch(
+        "kinetic.backend.execution.packager.zip_working_dir",
+      ) as mock_zip,
+      mock.patch(
+        "kinetic.backend.execution._find_requirements",
+        return_value=None,
+      ),
+    ):
+      _prepare_artifacts(ctx, "/tmp/build")
+
+    mock_zip.assert_called_once_with(
+      "/tmp/user-project",
+      "/tmp/build/context.zip",
+      exclude_paths=set(),
+    )
 
 
 if __name__ == "__main__":
