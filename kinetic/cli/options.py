@@ -27,3 +27,19 @@ def common_options(f):
     help=f"GKE cluster name [default: {DEFAULT_CLUSTER_NAME}]",
   )(f)
   return f
+
+
+def jobs_options(f):
+  """Shared options for ``kinetic jobs`` subcommands.
+
+  Extends ``common_options`` with ``--namespace``.
+  """
+  f = common_options(f)
+  f = click.option(
+    "--namespace",
+    envvar="KINETIC_NAMESPACE",
+    default="default",
+    show_default=True,
+    help="Kubernetes namespace [env: KINETIC_NAMESPACE]",
+  )(f)
+  return f
