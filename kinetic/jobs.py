@@ -20,6 +20,7 @@ from google.api_core import exceptions as google_exceptions
 from kubernetes import client
 
 from kinetic.backend import gke_client, pathways_client
+from kinetic.backend.execution import attach_remote_traceback
 from kinetic.backend.log_streaming import LogStreamer
 from kinetic.constants import get_default_cluster_name, get_default_zone
 from kinetic.credentials import ensure_credentials
@@ -89,16 +90,6 @@ def _get_required_project(project: str | None = None) -> str:
 def _build_bucket_name(project: str, cluster_name: str) -> str:
   """Return the jobs bucket name for a project and cluster."""
   return f"{project}-kn-{cluster_name}-jobs"
-
-
-def _attach_remote_traceback(
-  exception: BaseException, remote_traceback: str | None
-) -> BaseException:
-  """Attach the remote traceback string to an exception when available."""
-  if not remote_traceback or not hasattr(exception, "add_note"):
-    return exception
-  exception.add_note(f"Remote traceback:\n{remote_traceback}")
-  return exception
 
 
 @dataclass
@@ -367,7 +358,7 @@ class JobHandle:
 
       if result_payload["success"]:
         return result_payload["result"]
-      raise _attach_remote_traceback(
+      raise attach_remote_traceback(
         result_payload["exception"],
         result_payload.get("traceback"),
       )

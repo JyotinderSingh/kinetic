@@ -15,6 +15,7 @@ from kinetic.backend.execution import (
   _find_requirements,
   _prepare_artifacts,
   execute_remote,
+  submit_remote,
 )
 
 
@@ -271,9 +272,11 @@ class TestExecuteRemote(absltest.TestCase):
 
   def test_success_flow(self):
     with (
-      mock.patch("kinetic.backend.execution.ensure_credentials"),
-      mock.patch("kinetic.backend.execution._build_container"),
-      mock.patch("kinetic.backend.execution._upload_artifacts"),
+      mock.patch("kinetic.backend.execution.prepare_execution"),
+      mock.patch(
+        "kinetic.backend.execution.submit_to_k8s",
+        return_value=MagicMock(),
+      ),
       mock.patch(
         "kinetic.backend.execution._download_result",
         return_value={"success": True, "result": 42},
@@ -282,28 +285,29 @@ class TestExecuteRemote(absltest.TestCase):
         "kinetic.backend.execution._cleanup_and_return",
         return_value=42,
       ),
-      mock.patch("kinetic.backend.execution.storage"),
+      mock.patch("kinetic.backend.execution.cleanup_gcs_artifacts"),
     ):
       ctx = self._make_ctx()
       backend = MagicMock()
 
       result = execute_remote(ctx, backend)
 
-      backend.submit_job.assert_called_once_with(ctx)
       backend.wait_for_job.assert_called_once()
       backend.cleanup_job.assert_called_once()
       self.assertEqual(result, 42)
 
   def test_cleanup_on_wait_failure(self):
     with (
-      mock.patch("kinetic.backend.execution.ensure_credentials"),
-      mock.patch("kinetic.backend.execution._build_container"),
-      mock.patch("kinetic.backend.execution._upload_artifacts"),
+      mock.patch("kinetic.backend.execution.prepare_execution"),
+      mock.patch(
+        "kinetic.backend.execution.submit_to_k8s",
+        return_value=MagicMock(),
+      ),
       mock.patch(
         "kinetic.backend.execution._download_result",
         side_effect=google_exceptions.NotFound("no result uploaded"),
       ),
-      mock.patch("kinetic.backend.execution.storage"),
+      mock.patch("kinetic.backend.execution.cleanup_gcs_artifacts"),
     ):
       ctx = self._make_ctx()
       backend = MagicMock()
@@ -314,6 +318,32 @@ class TestExecuteRemote(absltest.TestCase):
 
       # cleanup_job is called in finally block even when wait fails
       backend.cleanup_job.assert_called_once()
+
+  def test_gcs_cleanup_always_attempted(self):
+    with (
+      mock.patch("kinetic.backend.execution.prepare_execution"),
+      mock.patch(
+        "kinetic.backend.execution.submit_to_k8s",
+        return_value=MagicMock(),
+      ),
+      mock.patch(
+        "kinetic.backend.execution._download_result",
+        return_value={"success": True, "result": 42},
+      ),
+      mock.patch(
+        "kinetic.backend.execution._cleanup_and_return",
+        return_value=42,
+      ),
+      mock.patch(
+        "kinetic.backend.execution.cleanup_gcs_artifacts"
+      ) as mock_gcs,
+    ):
+      ctx = self._make_ctx()
+      backend = MagicMock()
+
+      execute_remote(ctx, backend)
+
+      mock_gcs.assert_called_once_with(ctx)
 
 
 class TestPrepareArtifacts(absltest.TestCase):
@@ -355,6 +385,132 @@ class TestPrepareArtifacts(absltest.TestCase):
       "/tmp/user-project",
       "/tmp/build/context.zip",
       exclude_paths=set(),
+    )
+
+
+class TestSubmitRemote(absltest.TestCase):
+  def _make_ctx(self):
+    def train():
+      return 1
+
+    return JobContext(
+      func=train,
+      args=(),
+      kwargs={},
+      env_vars={},
+      accelerator="v6e-8",
+      container_image=None,
+      zone="us-central1-a",
+      project="proj",
+      cluster_name="cluster",
+    )
+
+  def _make_backend(self):
+    backend = MagicMock()
+    backend.namespace = "default"
+    backend.get_k8s_name.return_value = "kinetic-job-1234"
+    return backend
+
+  def test_returns_job_handle(self):
+    ctx = self._make_ctx()
+    backend = self._make_backend()
+
+    with (
+      mock.patch(
+        "kinetic.backend.execution.prepare_execution",
+        side_effect=lambda _ctx, _b: setattr(_ctx, "image_uri", "img:tag"),
+      ),
+      mock.patch("kinetic.backend.execution.storage.upload_handle"),
+      mock.patch("kinetic.backend.execution.submit_to_k8s"),
+    ):
+      handle = submit_remote(ctx, backend)
+
+    self.assertEqual(handle.job_id, ctx.job_id)
+    self.assertEqual(handle.k8s_name, "kinetic-job-1234")
+
+  def test_handle_uploaded_before_k8s_submit(self):
+    ctx = self._make_ctx()
+    backend = self._make_backend()
+    call_order = []
+
+    with (
+      mock.patch(
+        "kinetic.backend.execution.prepare_execution",
+        side_effect=lambda _ctx, _b: setattr(_ctx, "image_uri", "img:tag"),
+      ),
+      mock.patch(
+        "kinetic.backend.execution.storage.upload_handle",
+        side_effect=lambda *a, **kw: call_order.append("handle"),
+      ),
+      mock.patch(
+        "kinetic.backend.execution.submit_to_k8s",
+        side_effect=lambda *a, **kw: call_order.append("submit"),
+      ),
+    ):
+      submit_remote(ctx, backend)
+
+    self.assertEqual(call_order, ["handle", "submit"])
+
+  def test_conclusive_submit_failure_cleans_up(self):
+    ctx = self._make_ctx()
+    backend = self._make_backend()
+    backend.job_exists.return_value = False
+
+    with (
+      mock.patch(
+        "kinetic.backend.execution.prepare_execution",
+        side_effect=lambda _ctx, _b: setattr(_ctx, "image_uri", "img:tag"),
+      ),
+      mock.patch("kinetic.backend.execution.storage.upload_handle"),
+      mock.patch(
+        "kinetic.backend.execution.submit_to_k8s",
+        side_effect=RuntimeError("submit failed"),
+      ),
+      mock.patch(
+        "kinetic.backend.execution.cleanup_gcs_artifacts"
+      ) as mock_cleanup,
+      self.assertRaisesRegex(RuntimeError, "submit failed"),
+    ):
+      submit_remote(ctx, backend)
+
+    mock_cleanup.assert_called_once_with(ctx)
+
+  def test_ambiguous_submit_failure_returns_handle_when_job_exists(self):
+    ctx = self._make_ctx()
+    backend = self._make_backend()
+    backend.job_exists.return_value = True
+
+    with (
+      mock.patch(
+        "kinetic.backend.execution.prepare_execution",
+        side_effect=lambda _ctx, _b: setattr(_ctx, "image_uri", "img:tag"),
+      ),
+      mock.patch("kinetic.backend.execution.storage.upload_handle"),
+      mock.patch(
+        "kinetic.backend.execution.submit_to_k8s",
+        side_effect=RuntimeError("transport reset"),
+      ),
+      mock.patch(
+        "kinetic.backend.execution.cleanup_gcs_artifacts"
+      ) as mock_cleanup,
+    ):
+      handle = submit_remote(ctx, backend)
+
+    self.assertEqual(handle.job_id, ctx.job_id)
+    mock_cleanup.assert_not_called()
+
+  def test_gke_backend_k8s_name(self):
+    from kinetic.backend.execution import GKEBackend
+
+    backend = GKEBackend(cluster="c", namespace="default")
+    self.assertEqual(backend.get_k8s_name("job-abc"), "kinetic-job-abc")
+
+  def test_pathways_backend_k8s_name(self):
+    from kinetic.backend.execution import PathwaysBackend
+
+    backend = PathwaysBackend(cluster="c", namespace="default")
+    self.assertEqual(
+      backend.get_k8s_name("job-abc"), "keras-pathways-job-abc"
     )
 
 
