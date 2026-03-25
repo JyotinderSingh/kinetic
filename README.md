@@ -46,6 +46,7 @@ You need a GKE cluster with accelerator node pools to run jobs. The `kinetic` CL
 ## Features
 
 - **Simple decorator API** — Add `@kinetic.run()` to any function to execute it remotely
+- **Detached execution** — Use `@kinetic.submit()` to launch work, reattach later, and collect results when convenient
 - **Automatic infrastructure** — No manual VM provisioning or teardown required
 - **Result serialization** — Functions return actual values, not just logs
 - **Fast iteration** — Container images are cached by dependency hash; unchanged dependencies skip the build entirely (subsequent runs start in less than a minute)
@@ -134,6 +135,45 @@ print(result)
 > **First run timing:** The initial execution takes longer (~5 minutes) because it builds a container image with your dependencies. Subsequent runs with unchanged dependencies use the cached image and start in less than a minute.
 
 ## Usage Guide
+
+### Async Jobs and Reattachment
+
+Use `@kinetic.submit()` when you want a durable handle instead of blocking for the final value:
+
+```python
+import kinetic
+
+@kinetic.submit(accelerator="v6e-8")
+def train_model():
+    import time
+    time.sleep(60)
+    return {"loss": 0.1}
+
+job = train_model()
+print(job.job_id)
+print(job.status().value)
+print(job.tail(20))
+```
+
+You can reattach from a later shell or a different machine with access to the same project:
+
+```python
+job = kinetic.attach(
+    job_id="job-a1b2c3d4",
+    project="my-project",
+    cluster="kinetic-cluster",
+)
+
+metrics = job.result()
+print(metrics)
+```
+
+To discover currently live jobs from Python:
+
+```python
+for job in kinetic.list_jobs(project="my-project", cluster="kinetic-cluster"):
+    print(job.job_id, job.func_name, job.status().value)
+```
 
 ### Training a Keras Model
 
@@ -474,6 +514,25 @@ kinetic pool list
 
 # Remove a node pool by name
 kinetic pool remove <pool-name>
+```
+
+#### `kinetic jobs`
+
+Inspect and manage async jobs submitted with `@kinetic.submit()`:
+
+```bash
+# List live jobs in the cluster
+kinetic jobs list
+
+# Inspect a specific job
+kinetic jobs status <job-id>
+kinetic jobs logs <job-id> --tail 100
+kinetic jobs logs <job-id> --follow
+
+# Collect the final result or clean up resources
+kinetic jobs result <job-id>
+kinetic jobs cancel <job-id>
+kinetic jobs cleanup <job-id>
 ```
 
 ### Monitoring
