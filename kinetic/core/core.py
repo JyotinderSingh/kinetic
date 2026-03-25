@@ -5,11 +5,105 @@ from kinetic.backend.execution import (
   GKEBackend,
   JobContext,
   PathwaysBackend,
-  execute_remote,
+  submit_remote,
 )
 from kinetic.constants import DEFAULT_CLUSTER_NAME
 from kinetic.core import accelerators
 from kinetic.data import Data
+
+
+def _validate_volumes(volumes):
+  """Validate the optional volumes mapping."""
+  if volumes is None:
+    return
+  if not isinstance(volumes, dict):
+    raise TypeError(f"volumes must be a dict, got {type(volumes).__name__}")
+  for mount_path, data_obj in volumes.items():
+    if not isinstance(mount_path, str) or not mount_path.startswith("/"):
+      raise ValueError(
+        f"Volume mount path must be an absolute path "
+        f"(start with '/'), got: {mount_path!r}"
+      )
+    if not isinstance(data_obj, Data):
+      raise TypeError(
+        f"Volume value for {mount_path!r} must be a Data "
+        f"instance, got {type(data_obj).__name__}"
+      )
+
+
+def _capture_env(capture_env_vars):
+  """Capture requested environment variables for remote execution."""
+  env_vars = {}
+  if not capture_env_vars:
+    return env_vars
+
+  for pattern in capture_env_vars:
+    if pattern.endswith("*"):
+      prefix = pattern[:-1]
+      env_vars.update(
+        {k: v for k, v in os.environ.items() if k.startswith(prefix)}
+      )
+    elif pattern in os.environ:
+      env_vars[pattern] = os.environ[pattern]
+  return env_vars
+
+
+def _resolve_backend_name(accelerator, backend):
+  """Resolve the backend from explicit config or accelerator type."""
+  if backend is not None:
+    return backend
+
+  try:
+    accel_config = accelerators.parse_accelerator(accelerator)
+    if (
+      isinstance(accel_config, accelerators.TpuConfig)
+      and accel_config.num_nodes > 1
+    ):
+      return "pathways"
+  except ValueError:
+    pass
+  return "gke"
+
+
+def _build_context(
+  func,
+  args,
+  kwargs,
+  accelerator,
+  container_image,
+  zone,
+  project,
+  cluster,
+  namespace,
+  env_vars,
+  volumes,
+  resolved_backend,
+):
+  """Create a (JobContext, BaseK8sBackend) pair with resolved defaults."""
+  if not cluster:
+    cluster = os.environ.get("KINETIC_CLUSTER", DEFAULT_CLUSTER_NAME)
+  if not namespace:
+    namespace = os.environ.get("KINETIC_NAMESPACE", "default")
+
+  ctx = JobContext.from_params(
+    func,
+    args,
+    kwargs,
+    accelerator,
+    container_image,
+    zone,
+    project,
+    env_vars,
+    cluster_name=cluster,
+    volumes=volumes,
+  )
+
+  if resolved_backend == "pathways":
+    backend_inst = PathwaysBackend(cluster=cluster, namespace=namespace)
+  else:
+    backend_inst = GKEBackend(cluster=cluster, namespace=namespace)
+
+  return ctx, backend_inst
 
 
 def run(
@@ -40,93 +134,100 @@ def run(
       ``{"/data": Data("./dataset/")}``. Data is downloaded to these
       paths on the pod before function execution.
   """
-  # Validate volumes
-  if volumes is not None:
-    if not isinstance(volumes, dict):
-      raise TypeError(f"volumes must be a dict, got {type(volumes).__name__}")
-    for mount_path, data_obj in volumes.items():
-      if not isinstance(mount_path, str) or not mount_path.startswith("/"):
-        raise ValueError(
-          f"Volume mount path must be an absolute path "
-          f"(start with '/'), got: {mount_path!r}"
-        )
-      if not isinstance(data_obj, Data):
-        raise TypeError(
-          f"Volume value for {mount_path!r} must be a Data "
-          f"instance, got {type(data_obj).__name__}"
-        )
+  _validate_volumes(volumes)
 
   def decorator(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-      # Capture environment variables
-      env_vars = {}
-      if capture_env_vars:
-        for pattern in capture_env_vars:
-          if pattern.endswith("*"):
-            prefix = pattern[:-1]
-            env_vars.update(
-              {k: v for k, v in os.environ.items() if k.startswith(prefix)}
-            )
-          elif pattern in os.environ:
-            env_vars[pattern] = os.environ[pattern]
+      env_vars = _capture_env(capture_env_vars)
+      resolved_backend = _resolve_backend_name(accelerator, backend)
 
-      # Resolve backend
-      resolved_backend = backend
-      if resolved_backend is None:
-        try:
-          accel_config = accelerators.parse_accelerator(accelerator)
-          # Use Pathways for multi-host TPUs (if supported) or simplified logic
-          # For now, let's default to GKE unless explicit or strictly needed
-          if (
-            isinstance(accel_config, accelerators.TpuConfig)
-            and accel_config.num_nodes > 1
-          ):
-            resolved_backend = "pathways"
-          else:
-            resolved_backend = "gke"
-        except ValueError:
-          resolved_backend = "gke"
-
-      if resolved_backend == "gke":
-        return _execute_on_gke(
-          func,
-          args,
-          kwargs,
-          accelerator,
-          container_image,
-          zone,
-          project,
-          cluster,
-          namespace,
-          env_vars,
-          volumes,
-        )
-      elif resolved_backend == "pathways":
-        return _execute_on_pathways(
-          func,
-          args,
-          kwargs,
-          accelerator,
-          container_image,
-          zone,
-          project,
-          cluster,
-          namespace,
-          env_vars,
-          volumes,
-        )
-      else:
+      if resolved_backend not in ("gke", "pathways"):
         raise ValueError(
-          f"Unknown backend: {resolved_backend}. Use 'gke', 'pathways', or None for auto-detection"
+          f"Unknown backend: {resolved_backend}. "
+          "Use 'gke', 'pathways', or None for auto-detection"
         )
+
+      return _execute_on_backend(
+        func,
+        args,
+        kwargs,
+        accelerator,
+        container_image,
+        zone,
+        project,
+        cluster,
+        namespace,
+        env_vars,
+        volumes,
+        resolved_backend,
+      )
 
     return wrapper
 
   return decorator
 
 
-def _execute_on_gke(
+def submit(
+  accelerator="v6e-8",
+  container_image=None,
+  zone=None,
+  project=None,
+  capture_env_vars=None,
+  cluster=None,
+  backend=None,
+  namespace=None,
+  volumes=None,
+):
+  """Submit function for remote execution, returning a ``JobHandle``.
+
+  Same parameters as ``run()``.  Blocks through container build and
+  artifact upload, but returns immediately after k8s submission.
+  Use the returned ``JobHandle`` to observe, collect, or cancel.
+
+  Returns:
+    A decorator whose wrapper returns a ``JobHandle``.
+  """
+  _validate_volumes(volumes)
+
+  def decorator(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+      env_vars = _capture_env(capture_env_vars)
+      resolved_backend = _resolve_backend_name(accelerator, backend)
+
+      if resolved_backend not in ("gke", "pathways"):
+        raise ValueError(
+          f"Unknown backend: {resolved_backend}. "
+          "Use 'gke', 'pathways', or None for auto-detection"
+        )
+
+      return _submit_on_backend(
+        func,
+        args,
+        kwargs,
+        accelerator,
+        container_image,
+        zone,
+        project,
+        cluster,
+        namespace,
+        env_vars,
+        volumes,
+        resolved_backend,
+      )
+
+    return wrapper
+
+  return decorator
+
+
+# ------------------------------------------------------------------
+# Internal dispatch helpers
+# ------------------------------------------------------------------
+
+
+def _execute_on_backend(
   func,
   args,
   kwargs,
@@ -138,15 +239,10 @@ def _execute_on_gke(
   namespace,
   env_vars,
   volumes,
+  resolved_backend,
 ):
-  """Execute function on GKE cluster with GPU/TPU nodes."""
-  # Get GKE-specific defaults
-  if not cluster:
-    cluster = os.environ.get("KINETIC_CLUSTER", DEFAULT_CLUSTER_NAME)
-  if not namespace:
-    namespace = os.environ.get("KINETIC_NAMESPACE", "default")
-
-  ctx = JobContext.from_params(
+  """Build context and execute synchronously (submit + result)."""
+  return _submit_on_backend(
     func,
     args,
     kwargs,
@@ -154,14 +250,15 @@ def _execute_on_gke(
     container_image,
     zone,
     project,
+    cluster,
+    namespace,
     env_vars,
-    cluster_name=cluster,
-    volumes=volumes,
-  )
-  return execute_remote(ctx, GKEBackend(cluster=cluster, namespace=namespace))
+    volumes,
+    resolved_backend,
+  ).result()
 
 
-def _execute_on_pathways(
+def _submit_on_backend(
   func,
   args,
   kwargs,
@@ -173,14 +270,10 @@ def _execute_on_pathways(
   namespace,
   env_vars,
   volumes,
+  resolved_backend,
 ):
-  """Execute function on GKE cluster via ML Pathways."""
-  if not cluster:
-    cluster = os.environ.get("KINETIC_CLUSTER", DEFAULT_CLUSTER_NAME)
-  if not namespace:
-    namespace = os.environ.get("KINETIC_NAMESPACE", "default")
-
-  ctx = JobContext.from_params(
+  """Build context and submit asynchronously."""
+  ctx, backend_inst = _build_context(
     func,
     args,
     kwargs,
@@ -188,10 +281,10 @@ def _execute_on_pathways(
     container_image,
     zone,
     project,
+    cluster,
+    namespace,
     env_vars,
-    cluster_name=cluster,
-    volumes=volumes,
+    volumes,
+    resolved_backend,
   )
-  return execute_remote(
-    ctx, PathwaysBackend(cluster=cluster, namespace=namespace)
-  )
+  return submit_remote(ctx, backend_inst)

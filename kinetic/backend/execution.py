@@ -135,6 +135,14 @@ class BaseK8sBackend:
     """Optional cleanup after job completion."""
     raise NotImplementedError
 
+  def get_k8s_name(self, job_id: str) -> str:
+    """Return the backend-specific Kubernetes resource name."""
+    raise NotImplementedError
+
+  def job_exists(self, job_name: str) -> bool:
+    """Return whether the Kubernetes resource currently exists."""
+    raise NotImplementedError
+
 
 class GKEBackend(BaseK8sBackend):
   """Backend adapter for standard GKE Jobs."""
@@ -169,6 +177,14 @@ class GKEBackend(BaseK8sBackend):
     """Clean up K8s job resources."""
     job_name = job.metadata.name
     gke_client.cleanup_job(job_name, namespace=self.namespace)
+
+  def get_k8s_name(self, job_id: str) -> str:
+    """Return the standard GKE Job name for this job ID."""
+    return f"kinetic-{job_id}"
+
+  def job_exists(self, job_name: str) -> bool:
+    """Return whether the GKE Job exists."""
+    return gke_client.job_exists(job_name, namespace=self.namespace)
 
 
 class PathwaysBackend(BaseK8sBackend):
@@ -205,6 +221,14 @@ class PathwaysBackend(BaseK8sBackend):
     """Clean up LWS resources."""
     job_name = pathways_client._get_job_name(ctx.job_id)
     pathways_client.cleanup_job(job_name, namespace=self.namespace)
+
+  def get_k8s_name(self, job_id: str) -> str:
+    """Return the standard LeaderWorkerSet name for this job ID."""
+    return pathways_client._get_job_name(job_id)
+
+  def job_exists(self, job_name: str) -> bool:
+    """Return whether the LeaderWorkerSet exists."""
+    return pathways_client.job_exists(job_name, namespace=self.namespace)
 
 
 def _find_requirements(start_dir: str) -> Optional[str]:
@@ -340,6 +364,46 @@ def _upload_artifacts(ctx: JobContext) -> None:
   )
 
 
+def prepare_execution(ctx: JobContext, backend: BaseK8sBackend) -> None:
+  """Run the shared pre-submit phases for a remote job."""
+  ensure_credentials(
+    project=ctx.project,
+    zone=ctx.zone,
+    cluster=backend.cluster,
+  )
+  backend.validate_preflight(ctx)
+
+  with tempfile.TemporaryDirectory() as tmpdir:
+    _prepare_artifacts(ctx, tmpdir)
+    _build_container(ctx)
+    _upload_artifacts(ctx)
+
+
+def submit_to_k8s(ctx: JobContext, backend: BaseK8sBackend) -> Any:
+  """Submit a prepared job to Kubernetes."""
+  logging.info("Submitting job to %s...", backend.__class__.__name__)
+  return backend.submit_job(ctx)
+
+
+def attach_remote_traceback(
+  exception: BaseException, remote_traceback: str | None
+) -> BaseException:
+  """Attach the remote traceback string to an exception when available."""
+  if not remote_traceback or not hasattr(exception, "add_note"):
+    return exception
+  exception.add_note(f"Remote traceback:\n{remote_traceback}")
+  return exception
+
+
+def cleanup_gcs_artifacts(ctx: JobContext) -> None:
+  """Best-effort cleanup of uploaded GCS job artifacts."""
+  storage.cleanup_artifacts(
+    ctx.bucket_name,
+    ctx.job_id,
+    project=ctx.project,
+  )
+
+
 def _download_result(ctx: JobContext) -> dict:
   """Download and deserialize result from Cloud Storage."""
   logging.info("Downloading result...")
@@ -361,7 +425,10 @@ def _cleanup_and_return(ctx: JobContext, result_payload: dict) -> Any:
     return result_payload["result"]
   else:
     logging.error("Remote execution failed:\n%s", result_payload["traceback"])
-    raise result_payload["exception"]
+    raise attach_remote_traceback(
+      result_payload["exception"],
+      result_payload.get("traceback"),
+    )
 
 
 def execute_remote(ctx: JobContext, backend: BaseK8sBackend) -> Any:
@@ -380,62 +447,100 @@ def execute_remote(ctx: JobContext, backend: BaseK8sBackend) -> Any:
   Raises:
       Exception: Re-raised from remote execution if it failed
   """
-  ensure_credentials(
-    project=ctx.project,
-    zone=ctx.zone,
-    cluster=backend.cluster,
+  prepare_execution(ctx, backend)
+
+  try:
+    job = submit_to_k8s(ctx, backend)
+
+    # Step 5: Wait for completion (with cleanup on failure)
+    job_error = None
+    try:
+      backend.wait_for_job(job, ctx)
+    except RuntimeError as e:
+      job_error = e
+    finally:
+      backend.cleanup_job(job, ctx)
+
+    # Step 6: Download and deserialize result
+    # Try even if the job failed — the runner may have captured a user
+    # exception and uploaded the result before exiting with non-zero.
+    if job_error is not None:
+      try:
+        result_payload = _download_result(ctx)
+      except google_exceptions.NotFound:
+        # Result wasn't uploaded (infrastructure failure), surface the
+        # original job error.
+        raise job_error from None
+    else:
+      result_payload = _download_result(ctx)
+
+    # Step 7: Return result or raise remote exception
+    return _cleanup_and_return(ctx, result_payload)
+  finally:
+    # Always attempt GCS cleanup, even if download or deserialization
+    # fails unexpectedly. This prevents orphaned artifacts.
+    try:
+      cleanup_gcs_artifacts(ctx)
+    except Exception:
+      logging.warning(
+        "Failed to clean up GCS artifacts for job %s", ctx.job_id
+      )
+
+
+def submit_remote(ctx: JobContext, backend: BaseK8sBackend):
+  """Submit a job and return a JobHandle without waiting for completion.
+
+  Runs the shared pre-submit phases (credentials, preflight, prepare,
+  build, upload), persists a durable handle to GCS, and submits the
+  job to Kubernetes.  The caller observes, collects, and cleans up
+  via the returned handle.
+
+  Returns:
+      A ``JobHandle`` representing the submitted job.
+  """
+  from kinetic.jobs import JobHandle
+
+  prepare_execution(ctx, backend)
+
+  handle = JobHandle.from_job_context(
+    ctx,
+    backend_name="pathways" if isinstance(backend, PathwaysBackend) else "gke",
+    namespace=backend.namespace,
+    k8s_name=backend.get_k8s_name(ctx.job_id),
   )
 
-  # Preflight check
-  backend.validate_preflight(ctx)
+  try:
+    storage.upload_handle(
+      ctx.bucket_name,
+      ctx.job_id,
+      handle.to_dict(),
+      project=ctx.project,
+    )
+  except Exception:
+    cleanup_gcs_artifacts(ctx)
+    raise
 
-  with tempfile.TemporaryDirectory() as tmpdir:
-    # Step 1: Package artifacts
-    _prepare_artifacts(ctx, tmpdir)
-
-    # Step 2: Build or get cached container image
-    _build_container(ctx)
-
+  try:
+    submit_to_k8s(ctx, backend)
+  except Exception as submit_error:
     try:
-      # Step 3: Upload artifacts to Cloud Storage
-      _upload_artifacts(ctx)
-
-      # Step 4: Submit job (backend-specific)
-      logging.info("Submitting job to %s...", backend.__class__.__name__)
-      job = backend.submit_job(ctx)
-
-      # Step 5: Wait for completion (with cleanup on failure)
-      job_error = None
-      try:
-        backend.wait_for_job(job, ctx)
-      except RuntimeError as e:
-        job_error = e
-      finally:
-        backend.cleanup_job(job, ctx)
-
-      # Step 6: Download and deserialize result
-      # Try even if the job failed — the runner may have captured a user
-      # exception and uploaded the result before exiting with non-zero.
-      if job_error is not None:
-        try:
-          result_payload = _download_result(ctx)
-        except google_exceptions.NotFound:
-          # Result wasn't uploaded (infrastructure failure), surface the
-          # original job error.
-          raise job_error from None
-      else:
-        result_payload = _download_result(ctx)
-
-      # Step 7: Return result or raise remote exception
-      return _cleanup_and_return(ctx, result_payload)
-    finally:
-      # Always attempt GCS cleanup, even if download or deserialization
-      # fails unexpectedly. This prevents orphaned artifacts.
-      try:
-        storage.cleanup_artifacts(
-          ctx.bucket_name, ctx.job_id, project=ctx.project
-        )
-      except Exception:
+      if backend.job_exists(handle.k8s_name):
         logging.warning(
-          "Failed to clean up GCS artifacts for job %s", ctx.job_id
+          "Kubernetes create for %s failed but resource %s exists; "
+          "treating submission as successful",
+          ctx.job_id,
+          handle.k8s_name,
         )
+        return handle
+    except Exception:
+      logging.warning(
+        "Failed to reconcile submit error for job %s; "
+        "leaving uploaded artifacts in place",
+        ctx.job_id,
+      )
+      raise submit_error from None
+
+    cleanup_gcs_artifacts(ctx)
+    raise submit_error from None
+
+  return handle
