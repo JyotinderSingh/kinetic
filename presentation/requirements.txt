@@ -1,0 +1,10 @@
+# Pinned by the demo scripts. Kinetic walks up from the caller's directory
+# looking for requirements.txt or pyproject.toml and uses the first hit —
+# so this file overrides the repo-root pyproject.toml for the talk.
+#
+# jax, keras, cloudpickle, and google-cloud-storage are installed by Kinetic
+# itself (see kinetic/infra/container_builder.py:_CORE_DEPS) and do not need
+# to be listed here. Add only the extra packages the demo code imports.
+
+orbax-checkpoint
+gcsfs
