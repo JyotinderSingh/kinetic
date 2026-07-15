@@ -353,7 +353,7 @@ def _create_gke_cluster(
       master_ipv4_cidr_block="172.16.0.0/28",
     ),
     release_channel=gcp.container.ClusterReleaseChannelArgs(
-      channel="UNSPECIFIED",
+      channel="STABLE",
     ),
     deletion_protection=False,
     addons_config=gcp.container.ClusterAddonsConfigArgs(
