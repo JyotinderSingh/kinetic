@@ -60,6 +60,21 @@ image and start in under a minute. If you're churning dependencies
 multiple times a day and this is hurting you, see
 [Execution Modes](guides/execution_modes.md) for prebuilt mode.
 
+### Every submit uploads for a long time
+
+Kinetic logs the `context.zip` size on every submit. Kinetic logs a
+warning above 100 MB, and lists the five largest files. Read that warning
+first. The usual cause is a data directory, a checkpoint directory, or a
+virtualenv inside the [package root](guides/packaging.md). Wrap large
+inputs in `kinetic.Data(...)`, which Kinetic uploads one time and caches
+by content hash. As an alternative, add the paths to a `.kineticignore`
+file.
+
+Kinetic logs a separate warning above 50 MB of *payload*. The payload
+holds your arguments, the module-level globals that your function reads,
+and your first-party module code. The payload holds no files from the
+archive. Load a large object inside the function, or pass it as `Data`.
+
 ### Container build failures
 
 Check Cloud Build logs:
@@ -136,19 +151,93 @@ for the full list of multi-host failure modes.
 
 ## Runtime failures
 
-### `ImportError` on the remote pod
+### `ModuleNotFoundError` / `ImportError` on the remote pod
 
-The package isn't in your `requirements.txt` or `pyproject.toml`. A
-local `pip install` doesn't carry over — only what's in those files
-gets installed. See [Dependencies](guides/dependencies.md) for the
-common pitfalls list.
+Three different causes produce the same exception. Identify your cause
+from the module name in the traceback:
+
+| The missing module is | The cause | The fix |
+| --------------------- | --------- | ------- |
+| A third-party package (`pandas`, `transformers`, and more) | The package is not in your `requirements.txt` or `pyproject.toml`. A local `pip install` does not carry over. | Add the package to the dependency file. Read the `Using dependency file: ...` log line. Kinetic walks up from the entry directory of your function, so Kinetic can select a different file than you expect. See [Dependencies](guides/dependencies.md). |
+| One of your own modules or packages (`trainer`, `mylib.utils`, and more) | The module lives outside the detected [package root](guides/packaging.md), so it never entered `context.zip`. An exclusion rule can also remove it. | Put a `pyproject.toml`, a `requirements.txt`, or a `.git` at the top of the tree that you want to ship. As an alternative, set `KINETIC_PACKAGE_ROOT`. Check your `.kineticignore` and the default exclusion list. |
+| `kinetic` itself | An old prebuilt image or custom image does not have Kinetic installed, and one of your own modules runs `import kinetic` at module scope. | Kinetic now ships your first-party modules by value, so the pod does not import them to unpickle the job. Rebuild your image: a bundled image installs `keras-kinetic` automatically. For a custom image, run `pip install keras-kinetic` in the image. |
+
+The traceback names the frame that failed. A failure inside
+`cloudpickle.load` means that the pod needed the module to *deserialize*
+your job. A failure inside your function means a runtime `import`, which
+resolves against the pod `sys.path`: the workspace first, then the
+installed packages.
+
+### `FileNotFoundError` on a path that exists locally
+
+Check these three points, in order:
+
+1. **Is the file inside the [package root](guides/packaging.md)?**
+   Kinetic archives the package root only. A file one directory above
+   the root never ships.
+2. **Did an exclusion rule remove it?** Kinetic skips `.venv`,
+   `node_modules`, the cache directories, and every path that matches
+   your `.kineticignore`. Kinetic also excludes a local path that you
+   wrap in `Data(...)`. Read such a path through the value that the
+   `Data` argument resolves to, and not through its original location.
+3. **Is the path relative to the directory that you launched from?** The
+   pod changes to the workspace directory that matches your client
+   working directory, so a relative path behaves as it does locally. If
+   your client working directory was *outside* the package root, the pod
+   uses the workspace root instead.
+
+An absolute client path is not a supported way to read a shipped file.
+The runner does create one symbolic link at the path of your client
+working directory. That link points at the workspace root. The link exists
+so the debugger can map source files. Use a relative path.
 
 ### Pickle / cloudpickle errors at submit time
 
-The function or one of its closures references something that can't be
-serialized — typically an open file handle, a database connection, or
-a module-level singleton initialized for local use. Move that
-initialization inside the decorated function.
+Your function, or one of its closures, references an object that
+`cloudpickle` cannot serialize. These objects are the usual causes:
+
+- An open file handle.
+- A database connection.
+- A thread.
+- A lock.
+- A module-level singleton built for local use.
+
+Move the initialization of these objects inside the decorated function.
+
+Kinetic bisects the payload after a failure, and names the component at
+fault. One example message is
+`kinetic could not serialize argument 2 (type socket): ...`. The message
+identifies the function, one positional argument, or one keyword
+argument, instead of a location inside `cloudpickle`. Kinetic counts
+positional arguments from `0`.
+
+### Kinetic rejects one of your arguments at submit time
+
+Kinetic rejects three argument shapes at submit time, because none of
+them arrives on the pod unchanged:
+
+- A `Data` object inside a `set` or a `frozenset`.
+- A `Data` object used as a `dict` key.
+- A self-referential structure whose cycle runs through a tuple, a set,
+  or a frozenset. Kinetic reports this cycle only when the call also
+  holds a `Data` object.
+
+Each message names the position of the argument. See
+[What Ships to the Pod](guides/packaging.md) for the full set of
+guarantees about argument types.
+
+### Unpickling fails on the pod with a version-skew message
+
+Pickled code objects are not portable across Python minor versions. The
+runner compares the client fingerprint in the payload against the pod.
+The error that `result()` raises names both sides
+(`client Python 3.12.2 / pod Python 3.11.9`). The runner reports a
+difference in the `cloudpickle` version in the same way. The pod log holds
+a skew warning only when the payload unpickled correctly.
+
+Bundled mode always matches the Python of your client. For a prebuilt
+image or a custom image, you must match it yourself. See
+[Matching your local environment to the pod](guides/packaging.md#matching-your-local-environment-to-the-pod).
 
 ### JAX version mismatch errors
 
@@ -164,14 +253,97 @@ caused by an OOM kill or the kernel reaping the process. Check pod
 events with `kubectl describe pod <pod-name>` (find the pod name from
 `kinetic jobs status <id>`).
 
+### The job does not stop after your function returns
+
+Your function left a non-daemon thread alive: a data-loader worker, a
+metrics uploader, or a `ThreadPoolExecutor` that your code did not shut
+down. CPython waits for non-daemon threads at interpreter exit. The pod
+therefore stays alive after the work ends. You continue to pay for the
+accelerator.
+
+Kinetic uploads the result first. Kinetic then logs a warning that names
+every thread still alive, and forces the process to exit. The job
+completes, but that warning reports a real leak. Call `.shutdown()` or
+`.join()` on your executors and pools. As an alternative, create your
+threads with `daemon=True`.
+
+### The job fails with "function called sys.exit(N)"
+
+Kinetic treats a `sys.exit()` inside your function as the process-level
+exit that it is. `sys.exit()` and `sys.exit(0)` report a **success**. The
+result is `None`. Any other exit code fails the job with that message.
+Return a value instead of an exit if you want Kinetic to collect a result.
+
 ## Missing outputs and results
 
-### `result()` raises "result payload not found"
+### "Job failed but no result payload was found"
 
-The job either never produced one (it crashed before finishing), or
-it was already cleaned up. Failed jobs don't write a result payload.
-For long jobs, prefer writing artifacts under `KINETIC_OUTPUT_DIR`
-instead of relying on the return value — see [Checkpointing](guides/checkpointing.md).
+The pod died before it wrote anything to
+`gs://{bucket}/{job_id}/result.pkl`. Kinetic uploads a failure payload
+for each of its own startup phases. That payload carries a `phase` field,
+which names the phase at fault:
+
+- `artifact download`
+- `artifact verification`
+- `requirements install`
+- `context extract`
+- `payload unpickle`
+- `environment setup`
+- `data resolve`
+- `debugger setup`
+
+If you see this message, the failure happened outside those phases. These
+causes remain:
+
+- **Something killed the container** — an out-of-memory kill, a node
+  preemption on Spot, or a reap by the kernel. Run
+  `kubectl describe pod <pod-name>` and look for `OOMKilled` or an
+  eviction event. Get the pod name from `kinetic jobs status <id>`.
+- **The image cannot start the runner** — a custom image without
+  `/app/remote_runner.py`, `python3`, `cloudpickle`,
+  `google-cloud-storage`, or `absl-py`. The pod logs stop before any
+  Kinetic output.
+- **Cloud Storage was unreachable** — the runner could not upload the
+  failure payload either. The pod logs hold the original error.
+- **Kinetic already deleted the artifacts** — a blocking `run()` deletes
+  them after it collects a result, and `run_async()` deletes them on
+  `.cleanup()`. A reattach after that point finds nothing.
+
+For a long job, write your artifacts under `KINETIC_OUTPUT_DIR` instead
+of a return value. See [Checkpointing](guides/checkpointing.md).
+
+### Kinetic cannot serialize the return value of your job
+
+Your function returned an object that `cloudpickle` cannot serialize. The
+runner then uploads a payload with the flag `serialization_failed` and a
+`repr()` of the value. Kinetic reports the job as **failed**, because the
+return value is not retrievable, and a success report would hide the
+problem. The local error holds the truncated `repr`, so you can see what
+your function returned.
+
+Kinetic keeps the Cloud Storage artifacts in this case, so you can
+inspect the run afterwards. Kinetic still deletes the Kubernetes
+resource, so collect the pod logs first if you need them. Return
+something serializable instead, such as a path or a dict of metrics.
+Write the heavy object, or the object that holds a handle, to
+`KINETIC_OUTPUT_DIR`.
+
+### `result()` cannot unpickle the result after a reattach
+
+The result references classes from your project, or from a package that
+this client cannot import. Unpickling needs those types locally. A
+reattach from a different directory, a different virtualenv, or a
+different machine can therefore fail, although the client that submitted
+the job succeeds.
+
+Kinetic raises a `RuntimeError` that names the job and the artifact URI
+(`gs://{bucket}/{job_id}/result.pkl`), and chains the original error.
+Kinetic does **not** delete the Cloud Storage artifacts, so you lose
+nothing. Reattach from the project directory, with the same packages
+installed. As an alternative, download the object and inspect it there.
+
+Return plain data to avoid the problem completely: a dict, a list, a
+number, a string, or an array.
 
 ### Files I wrote inside the job are gone
 
@@ -223,5 +395,7 @@ fixes, the troubleshoot path prints a copy-paste command block.
 
 - [Getting Started](getting_started.md) — first-run setup that
   shouldn't have to fail twice.
+- [What Ships to the Pod](guides/packaging.md) — the packaging contract
+  behind most import failures and most failures of a file path.
 - [FAQ](guides/faq.md) — quick answers to common conceptual confusions.
 - [Configuration](configuration.md) — env vars and precedence.

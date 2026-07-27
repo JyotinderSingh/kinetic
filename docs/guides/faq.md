@@ -59,14 +59,69 @@ has Kinetic and your GCP credentials. The `job_id` is available on the `JobHandl
 returned by `run_async()`. If you have lost it, `kinetic.list_jobs()` enumerates
 jobs on the cluster. See [Managing Async Jobs](async_jobs.md).
 
+Note one condition: `.result()` unpickles the return value on your local
+machine. If the job returned an instance of one of your own classes, the
+machine that reattaches must import that class. Reattach from the project
+directory, or return plain data. If the unpickle fails, Kinetic raises an
+error, names the Cloud Storage artifact, and keeps that artifact.
+
+## Which directory does Kinetic upload with my job?
+
+Kinetic uploads the *package root*. Kinetic starts at the file that
+defines your decorated function. Kinetic walks up out of each directory
+that holds an `__init__.py` file. Kinetic then walks up to the nearest
+directory that holds a `pyproject.toml`, `requirements.txt`, `setup.py`,
+`setup.cfg`, or `.git` entry. Your home directory and the root of the
+file system are bounds for this search.
+
+Kinetic zips that directory. Kinetic excludes these paths from the
+archive:
+
+- The paths in your `Data(...)` objects.
+- The default exclusion list: `.venv`, `node_modules`, and the cache
+  directories.
+- Each path that a `.kineticignore` pattern matches.
+
+On the pod, the runner rebuilds `sys.path` and the working directory to
+match your client. Your imports and your relative paths thus operate as
+they do locally.
+
+To select the directory yourself, set `KINETIC_PACKAGE_ROOT`. The
+directory must exist, and it must contain the code that Kinetic packages.
+See [What Ships to the Pod](packaging.md).
+
+A notebook and a REPL have no source file. Kinetic packages your current
+working directory in this case.
+
 ## What gets cleaned up automatically?
 
-When a job succeeds, Kinetic removes its Kubernetes Job and pod by default,
-so they don't pile up in the cluster. Failed jobs are kept around so you
-can read logs and debug. GCS artifacts (uploaded code, requirements,
-metadata) are _not_ auto-deleted; call `JobHandle.cleanup(gcs=True)` if you
-want them gone. Outputs you wrote under `KINETIC_OUTPUT_DIR` are also kept
-unless you explicitly delete them.
+A blocking `run()` and a `JobHandle.result()` call delete the Kubernetes
+Job and its pod. Kinetic does this for a job that succeeded and for a job
+that failed, so that dead resources do not stay in the cluster. A job with
+`debug=True` keeps its Kubernetes resources. To keep the resources for
+any other job, call `handle.result(cleanup=False)`. Read the logs, then
+call `handle.cleanup()`.
+
+Kinetic deletes the Cloud Storage artifacts of the job (the uploaded code,
+the requirements, and the metadata) only when it collects a usable result.
+Kinetic keeps the artifacts in these conditions:
+
+- The job failed.
+- The job wrote no result.
+- The pod could not serialize the return value.
+- Your client could not deserialize the return value.
+
+For a job that you never collect, call `JobHandle.cleanup(gcs=True)` to
+delete the artifacts.
+
+Kinetic never deletes the outputs that you wrote under
+`KINETIC_OUTPUT_DIR` as part of job cleanup. The default output directory
+is in the job bucket, and the lifecycle rule of that bucket deletes
+objects after 30 days. Use one of these two methods to keep the outputs
+longer:
+
+- Copy the outputs to another bucket.
+- Set `output_dir` to a location outside that bucket.
 
 ## How do spot instances affect training?
 

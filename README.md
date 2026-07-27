@@ -34,6 +34,12 @@ final_loss = train_model()
 - **Data and checkpoint support.** Wrap inputs in `kinetic.Data(...)`
   to ship local files (or stream from GCS) into the job. Write durable
   outputs and resumable checkpoints under `KINETIC_OUTPUT_DIR`.
+- **Your project travels with the job.** Kinetic finds your package
+  root and ships the source with the pickled function. Kinetic then
+  rebuilds `sys.path` and the working directory on the pod. Multi-module
+  projects and relative-path reads thus operate as they do on your
+  machine.
+  See [What Ships to the Pod](https://kinetic.readthedocs.io/en/latest/guides/packaging.html).
 
 ## Documentation
 Comprehensive documentation is available at: https://kinetic.readthedocs.io

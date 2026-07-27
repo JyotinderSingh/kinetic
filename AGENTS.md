@@ -118,7 +118,7 @@ During `_prepare_artifacts()`:
 
 1. Upload `Data` from `volumes` and function args via `storage.upload_data()` (content-addressed)
 2. For `fuse=True` Data, build FUSE volume specs (stored on `ctx.fuse_volume_specs`)
-3. Replace `Data` objects in args/kwargs with serializable `__data_ref__` dicts (contain `gcs_uri`, `is_dir`, `mount_path`, `fuse`)
+3. Replace `Data` objects in args/kwargs with serializable `__data_ref__` dicts. Each dict has the keys `uri`, `is_dir`, `mount_path`, `fuse`, and `hf_trust_remote_code`. `make_data_ref()` in `kinetic/data/data.py` builds them.
 4. Local `Data` paths inside the caller directory are auto-excluded from `context.zip`
 
 On the remote pod (`remote_runner.py`):

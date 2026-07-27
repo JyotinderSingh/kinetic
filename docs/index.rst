@@ -16,6 +16,7 @@ Kinetic: Run ML workloads on cloud TPUs and GPUs
 
    guides/data
    guides/checkpointing
+   guides/packaging
    guides/dependencies
    guides/env_vars
    guides/profiles
@@ -98,9 +99,9 @@ How Kinetic works
 
 Five short phases on every job:
 
-1. **Discover.** Your function, working directory, and ``Data(...)``
-   arguments are captured. ``requirements.txt`` or ``pyproject.toml``
-   is read.
+1. **Discover.** Kinetic captures your function, its package root, and
+   the ``Data(...)`` arguments. Kinetic reads ``requirements.txt`` or
+   ``pyproject.toml``. See :doc:`What Ships to the Pod <guides/packaging>`.
 2. **Build or fetch.** A container image is produced — built with your
    dependencies (bundled mode) or pulled from a published base
    (prebuilt mode). See :doc:`Execution Modes <guides/execution_modes>`.

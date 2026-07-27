@@ -181,16 +181,41 @@ a serializable `__data_ref__` dict:
 ```python
 {
   "__data_ref__": True,
-  "gcs_uri": "gs://bucket/namespace/data-cache/abc123",
+  "uri": "gs://bucket/namespace/data-cache/abc123",
   "is_dir": True,
-  "mount_path": "/data",  # None for function-argument Data
+  "mount_path": "/data",  # None unless the Data is a volume or uses FUSE
   "fuse": False,  # True when fuse=True was passed
+  "hf_trust_remote_code": False,  # only used for hf:// URIs
 }
 ```
 
+`make_data_ref()` in `kinetic/data/data.py` builds this dict, and
+`is_data_ref()` recognizes it. The key is `uri`, not `gcs_uri`, because
+the same key also carries `hf://` URIs. FUSE volume specs use an unrelated
+key with the name `gcs_uri`. The section below describes those specs.
+
+Kinetic sets `mount_path` for two kinds of `Data`:
+
+- A `Data` object in the `volumes` dictionary gets the mount path that
+  you gave.
+- A function argument with `fuse=True` gets a generated mount path below
+  `/_kinetic/fuse-data/`.
+
+A plain function argument gets `mount_path: None`.
+
 On the remote pod, `resolve_data_refs()` in `remote_runner.py` walks the
-deserialized args/kwargs recursively and replaces these dicts with local
-filesystem paths.
+deserialized args and kwargs and replaces these dicts with local
+filesystem paths. The walk uses an identity memo. One `Data` object that
+you pass two times thus resolves one time. The aliasing between your
+arguments stays intact. Kinetic replaces the references only in lists,
+tuples, dicts, and the subclasses of these types. Kinetic does not find a
+`Data` object that you store as an attribute of your own class.
+
+Kinetic rejects these two shapes at submit time, because Python cannot
+hash the replacement dict:
+
+- A `Data` object inside a set or a frozenset.
+- A `Data` object used as a dictionary key.
 
 ### Upload and caching pipeline
 
