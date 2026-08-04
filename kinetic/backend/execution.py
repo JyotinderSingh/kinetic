@@ -81,7 +81,8 @@ class JobContext:
   def __post_init__(self):
     self.bucket_name = build_bucket_name(self.project, self.cluster_name)
     self.region = zone_to_region(self.zone)
-    self.display_name = f"kinetic-{self.func.__name__}-{self.job_id}"
+    func_name = getattr(self.func, "__name__", None) or type(self.func).__name__
+    self.display_name = f"kinetic-{func_name}-{self.job_id}"
     if self.working_dir is None:
       self.working_dir = _resolve_working_dir(self.func)
 
@@ -292,42 +293,300 @@ class PathwaysBackend(BaseK8sBackend):
     return pathways_client.job_exists(job_name, namespace=self.namespace)
 
 
+# Files that mark the root of a project/repository for packaging purposes.
+_PROJECT_MARKERS = (
+  "pyproject.toml",
+  "requirements.txt",
+  "setup.py",
+  "setup.cfg",
+  ".git",
+)
+
+
+def _home_dir() -> str:
+  """Return the absolute, normalized home directory."""
+  return os.path.normpath(os.path.abspath(os.path.expanduser("~")))
+
+
+def _has_repo_marker(search_dir: str) -> bool:
+  """Return whether *search_dir* is a repository root.
+
+  `.git` is a directory in normal clones and a file in worktrees and
+  submodules, so mere existence is the test.
+  """
+  return os.path.exists(os.path.join(search_dir, ".git"))
+
+
+def _has_project_marker(search_dir: str) -> bool:
+  """Return whether *search_dir* looks like a project/repository root."""
+  return any(
+    os.path.exists(os.path.join(search_dir, marker))
+    for marker in _PROJECT_MARKERS
+  )
+
+
+def _select_dependency_file(search_dir: str) -> Optional[str]:
+  """Return the dependency file to use from a single directory level."""
+  req_path = os.path.join(search_dir, "requirements.txt")
+  pyproject_path = os.path.join(search_dir, "pyproject.toml")
+  has_req = os.path.isfile(req_path)
+  has_pyproject = os.path.isfile(pyproject_path)
+  if has_req and has_pyproject:
+    logging.info(
+      "Both requirements.txt and pyproject.toml exist in %s; using "
+      "requirements.txt (it wins at the same directory level)",
+      search_dir,
+    )
+  if has_req:
+    return req_path
+  if has_pyproject:
+    return pyproject_path
+  return None
+
+
+def _warn_if_no_dependencies(path: str) -> None:
+  """Warn when the selected pyproject.toml declares no dependencies."""
+  if not path.endswith("pyproject.toml"):
+    return
+  try:
+    content = container_builder.prepare_requirements_content(path)
+  except Exception:
+    # Parsing errors surface with full context later in the build phase.
+    return
+  if content:
+    return
+  logging.warning(
+    "pyproject.toml at %s declares no [project].dependencies; the job will "
+    "run with base-image packages only. If your dependencies live in a "
+    "requirements.txt at a parent directory, move or copy it next to your "
+    "code (requirements.txt wins at the same level).",
+    path,
+  )
+
+
 def _find_requirements(start_dir: str) -> Optional[str]:
   """Search up directory tree for requirements.txt or pyproject.toml.
 
   At each directory level, `requirements.txt` is preferred over
   `pyproject.toml`.  The first match found while walking towards the
-  filesystem root is returned.
+  filesystem root is returned.  The walk stops after examining the first
+  directory that contains a repository marker (`.git`, as a directory or
+  as a worktree/submodule file), at the user's home directory, and at the
+  filesystem root, so a stray dependency file above the project is never
+  adopted as the job's entire dependency set.
   """
-  search_dir = start_dir
-  while search_dir != "/":
-    req_path = os.path.join(search_dir, "requirements.txt")
-    if os.path.exists(req_path):
-      return req_path
-    pyproject_path = os.path.join(search_dir, "pyproject.toml")
-    if os.path.exists(pyproject_path):
-      return pyproject_path
+  start = os.path.normpath(os.path.abspath(start_dir))
+  home = _home_dir()
+  search_dir = start
+  selected = None
+  repo_root = None
+  while True:
+    if selected is None:
+      selected = _select_dependency_file(search_dir)
+    if _has_repo_marker(search_dir):
+      repo_root = search_dir
+      break
     parent_dir = os.path.dirname(search_dir)
-    if parent_dir == search_dir:
+    if search_dir == home or parent_dir == search_dir:
       break
     search_dir = parent_dir
+
+  if selected is None:
+    return None
+
+  logging.info("Using dependency file: %s", selected)
+  if repo_root is None and os.path.dirname(selected) != start:
+    logging.warning(
+      "Dependency file %s lives outside your code directory %s and no "
+      "repository marker (.git) was found in between; its packages become "
+      "the job's entire dependency set.",
+      selected,
+      start,
+    )
+  _warn_if_no_dependencies(selected)
+  return selected
+
+
+def _relpath_under(path: str, root: str) -> Optional[str]:
+  """Return the relative path of *path* under *root*, or None if outside.
+
+  Returns "" when the two denote the same directory.  Comparison retries
+  on realpaths so symlinked roots (``/tmp`` vs ``/private/tmp``) match.
+  """
+  candidates = (
+    (os.path.normpath(path), os.path.normpath(root)),
+    (os.path.realpath(path), os.path.realpath(root)),
+  )
+  for candidate, base in candidates:
+    if candidate == base:
+      return ""
+    if candidate.startswith(base.rstrip(os.sep) + os.sep):
+      return os.path.relpath(candidate, base)
   return None
 
 
-def _maybe_exclude(data_path, caller_path, exclude_paths) -> None:
-  """Add data_path to exclude_paths if it's inside the caller directory."""
-  data_abs = os.path.normpath(data_path)
-  caller_abs = os.path.normpath(caller_path)
-  if data_abs.startswith(caller_abs + os.sep) or data_abs == caller_abs:
-    exclude_paths.add(data_abs)
+def _maybe_exclude(data_path, zip_root, exclude_paths) -> None:
+  """Add data_path to exclude_paths if it's inside the packaged tree.
+
+  The path is re-anchored on *zip_root* so it matches what the archiver
+  walks even when the caller resolved symlinks differently.
+  """
+  data_abs = os.path.normpath(os.path.abspath(data_path))
+  if not os.path.exists(data_abs):
+    return
+  root_abs = os.path.normpath(os.path.abspath(zip_root))
+  rel = _relpath_under(data_abs, root_abs)
+  if rel is None:
+    return
+  exclude_paths.add(
+    os.path.normpath(os.path.join(root_abs, rel)) if rel else root_abs
+  )
 
 
 def _resolve_working_dir(func: Callable) -> str:
   """Resolve the user working directory from the wrapped function."""
   module = inspect.getmodule(func)
-  if module and module.__file__:
-    return os.path.dirname(os.path.abspath(module.__file__))
-  return os.getcwd()
+  module_file = getattr(module, "__file__", None) if module else None
+  if module_file:
+    return os.path.dirname(os.path.abspath(module_file))
+  cwd = os.getcwd()
+  logging.info(
+    "Function %s has no source file (notebook, REPL, or 'python -c'); "
+    "packaging the current directory instead: %s",
+    getattr(func, "__name__", repr(func)),
+    cwd,
+  )
+  return cwd
+
+
+@dataclass
+class PackagingPlan:
+  """What to package for a job and how to rebuild the layout remotely.
+
+  Attributes:
+      working_dir: Directory of the file that defines the job function.
+      package_root: Directory zipped into ``context.zip``.
+      entry_rel: Relative path from *package_root* to *working_dir* ("" when
+          they are the same directory).
+      client_cwd_rel: Relative path of the client's cwd under
+          *package_root*, or None when the cwd is outside the tree.
+      sys_path_rel: Relative paths of client ``sys.path`` entries that live
+          under *package_root*; always starts with "" (the root itself).
+  """
+
+  working_dir: str
+  package_root: str
+  entry_rel: str
+  client_cwd_rel: Optional[str]
+  sys_path_rel: list[str]
+
+
+def _escape_package(working_dir: str, home: str) -> str:
+  """Walk up out of any package the working dir belongs to."""
+  search_dir = working_dir
+  while os.path.exists(os.path.join(search_dir, "__init__.py")):
+    parent_dir = os.path.dirname(search_dir)
+    if parent_dir == search_dir or search_dir == home:
+      break
+    search_dir = parent_dir
+  return search_dir
+
+
+def _find_package_root(package_base: str, home: str) -> Optional[str]:
+  """Search up from *package_base* for a project marker directory.
+
+  `$HOME` and the filesystem root are never adopted as the packaging root
+  unless the search started there.
+  """
+  search_dir = package_base
+  while True:
+    bounded = search_dir == home or os.path.dirname(search_dir) == search_dir
+    if (not bounded or search_dir == package_base) and _has_project_marker(
+      search_dir
+    ):
+      return search_dir
+    if bounded:
+      return None
+    search_dir = os.path.dirname(search_dir)
+
+
+def _sys_path_rel(package_root: str) -> list[str]:
+  """Return relative client sys.path entries living under *package_root*."""
+  rels = set()
+  for entry in sys.path:
+    # sys.path may contain non-string entries added by importer hooks.
+    if not isinstance(entry, str) or not entry or not os.path.exists(entry):
+      continue
+    if "site-packages" in entry or "dist-packages" in entry:
+      continue
+    rel = _relpath_under(os.path.abspath(entry), package_root)
+    if rel:
+      rels.add(rel)
+  return [""] + sorted(rels)
+
+
+def compute_packaging_plan(
+  func: Callable, working_dir: Optional[str] = None
+) -> PackagingPlan:
+  """Compute what to package for *func* and how the pod should lay it out.
+
+  The packaging root is the directory that keeps the function's module
+  importable under its original name: the walk escapes any package the
+  defining file belongs to (directories holding `__init__.py`), then
+  continues up to the nearest project marker (`pyproject.toml`,
+  `requirements.txt`, `setup.py`, `setup.cfg`, `.git`).  `$HOME` and the
+  filesystem root are bounds, never roots.  `KINETIC_PACKAGE_ROOT`
+  overrides detection entirely.
+
+  Args:
+      func: The user function being submitted.
+      working_dir: Overrides the resolved directory of the defining file.
+
+  Returns:
+      The `PackagingPlan` for this submission.
+
+  Raises:
+      ValueError: If `KINETIC_PACKAGE_ROOT` is not a parent of (or equal
+          to) the directory being packaged.
+  """
+  resolved = working_dir or _resolve_working_dir(func)
+  resolved = os.path.normpath(os.path.abspath(resolved))
+  home = _home_dir()
+
+  override = os.environ.get("KINETIC_PACKAGE_ROOT")
+  if override:
+    package_root = os.path.normpath(
+      os.path.abspath(os.path.expanduser(override))
+    )
+    if not os.path.isdir(package_root):
+      raise ValueError(
+        f"KINETIC_PACKAGE_ROOT={override!r} (resolved to {package_root}) "
+        f"is not an existing directory."
+      )
+    if _relpath_under(resolved, package_root) is None:
+      raise ValueError(
+        f"KINETIC_PACKAGE_ROOT={override!r} (resolved to {package_root}) "
+        f"does not contain the code being packaged ({resolved}). Set it to "
+        f"a parent directory of your project, or unset it."
+      )
+  else:
+    package_base = _escape_package(resolved, home)
+    package_root = _find_package_root(package_base, home) or package_base
+
+  entry_rel = _relpath_under(resolved, package_root) or ""
+  plan = PackagingPlan(
+    working_dir=resolved,
+    package_root=package_root,
+    entry_rel=entry_rel,
+    client_cwd_rel=_relpath_under(os.getcwd(), package_root),
+    sys_path_rel=_sys_path_rel(package_root),
+  )
+  logging.info(
+    "Packaging root: %s (code directory: %s)",
+    plan.package_root,
+    plan.entry_rel or ".",
+  )
+  return plan
 
 
 _FUSE_DATA_MOUNT_PREFIX = "/_kinetic/fuse-data"
@@ -347,14 +606,14 @@ def _fuse_gcs_uri(gcs_uri: str, data_obj) -> str:
 
 
 def _process_volumes(
-  ctx: JobContext, caller_path: str, exclude_paths: set[str]
+  ctx: JobContext, zip_root: str, exclude_paths: set[str]
 ) -> tuple[list[dict], list[dict]]:
   """Upload volume Data objects and build refs + FUSE specs.
 
   Args:
       ctx: Job context containing volume definitions, bucket name, and project.
-      caller_path: Absolute path of the caller's working directory, used to
-          resolve relative Data object paths for exclusion.
+      zip_root: Absolute path of the directory archived into context.zip,
+          used to decide which Data paths to exclude from it.
       exclude_paths: Mutable set of local paths to exclude from the working
           directory archive. Paths of non-GCS Data objects are added here so
           they are not redundantly packaged.
@@ -395,21 +654,21 @@ def _process_volumes(
         }
       )
     if not data_obj.is_gcs:
-      _maybe_exclude(data_obj.path, caller_path, exclude_paths)
+      _maybe_exclude(data_obj.path, zip_root, exclude_paths)
 
   return volume_refs, fuse_specs
 
 
 def _process_data_args(
-  ctx: JobContext, caller_path: str, exclude_paths: set[str]
+  ctx: JobContext, zip_root: str, exclude_paths: set[str]
 ) -> tuple[dict[int, dict], list[dict]]:
   """Upload Data objects found in function args and build ref map + FUSE specs.
 
   Args:
       ctx: Job context containing the function args/kwargs, bucket name, and
           project.
-      caller_path: Absolute path of the caller's working directory, used to
-          resolve relative Data object paths for exclusion.
+      zip_root: Absolute path of the directory archived into context.zip,
+          used to decide which Data paths to exclude from it.
       exclude_paths: Mutable set of local paths to exclude from the working
           directory archive. Paths of non-GCS Data objects are added here so
           they are not redundantly packaged.
@@ -451,7 +710,7 @@ def _process_data_args(
         hf_trust_remote_code=data_obj.hf_trust_remote_code,
       )
     if not data_obj.is_gcs:
-      _maybe_exclude(data_obj.path, caller_path, exclude_paths)
+      _maybe_exclude(data_obj.path, zip_root, exclude_paths)
 
   return ref_map, fuse_specs
 
@@ -470,12 +729,19 @@ def _prepare_artifacts(ctx: JobContext, tmpdir: str) -> None:
   logging.info("Packaging function and context...")
   if ctx.working_dir is None:
     raise ValueError("working_dir must be set before prepare")
-  caller_path = ctx.working_dir
+  plan = compute_packaging_plan(ctx.func, working_dir=ctx.working_dir)
+  zip_root = plan.package_root
+  plan_fields = {
+    "package_root": plan.package_root,
+    "entry_rel": plan.entry_rel,
+    "client_cwd_rel": plan.client_cwd_rel,
+    "sys_path_rel": plan.sys_path_rel,
+  }
   exclude_paths: set[str] = set()
 
   # Upload Data objects and build serializable refs
-  volume_refs, vol_fuse = _process_volumes(ctx, caller_path, exclude_paths)
-  ref_map, arg_fuse = _process_data_args(ctx, caller_path, exclude_paths)
+  volume_refs, vol_fuse = _process_volumes(ctx, zip_root, exclude_paths)
+  ref_map, arg_fuse = _process_data_args(ctx, zip_root, exclude_paths)
 
   all_fuse = vol_fuse + arg_fuse
   ctx.fuse_volume_specs = all_fuse if all_fuse else None
@@ -496,23 +762,26 @@ def _prepare_artifacts(ctx: JobContext, tmpdir: str) -> None:
     ctx.payload_path,
     volumes=volume_refs or None,
     working_dir=ctx.working_dir,
+    package_root=plan.package_root,
+    payload_extra=plan_fields,
   )
   ctx.payload_sha256 = _file_sha256(ctx.payload_path)
   logging.info("Payload serialized to %s", ctx.payload_path)
 
-  # Zip working directory (excluding Data paths)
+  # Zip the packaging root (excluding Data paths)
   ctx.context_path = os.path.join(tmpdir, "context.zip")
   packager.zip_working_dir(
-    caller_path, ctx.context_path, exclude_paths=exclude_paths
+    zip_root,
+    ctx.context_path,
+    exclude_paths=exclude_paths,
+    plan_json=plan_fields,
   )
   ctx.context_sha256 = _file_sha256(ctx.context_path)
   logging.info("Context packaged to %s", ctx.context_path)
 
   # Find requirements.txt or pyproject.toml
-  ctx.requirements_path = _find_requirements(caller_path)
-  if ctx.requirements_path:
-    logging.info("Found dependency file: %s", ctx.requirements_path)
-  else:
+  ctx.requirements_path = _find_requirements(ctx.working_dir)
+  if not ctx.requirements_path:
     logging.info("No requirements.txt or pyproject.toml found")
 
 
