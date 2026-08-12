@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import functools
+import operator
 import os
+import re
 import sys
 import warnings
 from typing import Any, Callable, Generic, ParamSpec, TypeVar, overload
+
+from absl import logging
 
 from kinetic.backend.execution import (
   GKEBackend,
@@ -46,21 +50,181 @@ def _validate_volumes(volumes):
       )
 
 
+# The pod applies captured values over the image's own environment, so a
+# wildcard that sweeps in client-side process configuration (a macOS PATH, a
+# local VIRTUAL_ENV, KERAS_BACKEND=torch) breaks the job before user code
+# runs. Wildcards never capture these; an exact name still does.
+_WILDCARD_ENV_BLOCKLIST = frozenset(
+  {
+    "PATH",
+    "HOME",
+    "PYTHONPATH",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "VIRTUAL_ENV",
+    "CONDA_PREFIX",
+    "CONDA_DEFAULT_ENV",
+    "SHELL",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "HOSTNAME",
+    "USER",
+    "LOGNAME",
+    "SSH_AUTH_SOCK",
+    "KUBERNETES_SERVICE_HOST",
+    "KERAS_BACKEND",
+  }
+)
+
+_SECRET_NAME_PATTERN = re.compile(
+  r"TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL", re.IGNORECASE
+)
+
+# Kept conservative so a sanitized repr is safe to embed in a display name.
+_UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
 def _capture_env(capture_env_vars):
-  """Capture requested environment variables for remote execution."""
+  """Capture requested environment variables for remote execution.
+
+  Args:
+    capture_env_vars: Names to capture. A trailing ``*`` makes the entry a
+      prefix pattern (``"AWS_*"``); ``"*"`` matches everything.
+
+  Returns:
+    Dict of captured variable names to their current values. Wildcard
+    matches skip process-critical variables (`_WILDCARD_ENV_BLOCKLIST`);
+    naming such a variable exactly still captures it.
+  """
   env_vars = {}
   if not capture_env_vars:
     return env_vars
 
+  explicit = {p for p in capture_env_vars if not p.endswith("*")}
+  skipped = set()
+
   for pattern in capture_env_vars:
     if pattern.endswith("*"):
       prefix = pattern[:-1]
-      env_vars.update(
-        {k: v for k, v in os.environ.items() if k.startswith(prefix)}
-      )
+      for name, value in os.environ.items():
+        if not name.startswith(prefix):
+          continue
+        if name in _WILDCARD_ENV_BLOCKLIST and name not in explicit:
+          skipped.add(name)
+          continue
+        env_vars[name] = value
     elif pattern in os.environ:
       env_vars[pattern] = os.environ[pattern]
+
+  if skipped:
+    logging.info(
+      "capture_env_vars: not capturing process-critical variables matched by "
+      "a wildcard: %s. Overriding the pod's own values for these breaks the "
+      "runtime; list a name exactly in capture_env_vars if you really need it.",
+      ", ".join(sorted(skipped)),
+    )
+  if env_vars:
+    logging.info(
+      "capture_env_vars: capturing %d environment variable(s): %s",
+      len(env_vars),
+      ", ".join(sorted(env_vars)),
+    )
+  secrets = sorted(n for n in env_vars if _SECRET_NAME_PATTERN.search(n))
+  if secrets:
+    logging.warning(
+      "capture_env_vars is shipping credential-looking variables (%s). Their "
+      "values are stored in plaintext inside the job payload in the job "
+      "bucket, which is readable by every job pod in the cluster. Artifacts "
+      "are deleted only when a job's result is collected; otherwise they "
+      "remain until the bucket retention period expires. This notice is "
+      "informational and appears even for variables you listed explicitly; "
+      "if shipping this credential is intentional, no action is needed.",
+      ", ".join(secrets),
+    )
   return env_vars
+
+
+def _unwrap_partial(func):
+  """Return the innermost callable behind a chain of functools.partial."""
+  while isinstance(func, functools.partial):
+    func = func.func
+  return func
+
+
+def _safe_func_name(func):
+  """Build a display-safe name for an arbitrary callable.
+
+  functools.partial objects and callable instances have no ``__name__``;
+  fall back to a sanitized, truncated repr rather than raising.
+  """
+  target = _unwrap_partial(func)
+  name = getattr(target, "__name__", None)
+  if isinstance(name, str) and name:
+    return name
+  sanitized = _UNSAFE_NAME_CHARS.sub("-", repr(target)).strip("-")[:40]
+  return sanitized or type(target).__name__
+
+
+def _validate_decorated_callable(func):
+  """Reject callables that cannot survive submission, at decoration time.
+
+  Each of these otherwise fails much later — after credentials, image
+  build, upload and node scheduling — with an error that names no user
+  symbol.
+  """
+  if isinstance(func, (classmethod, staticmethod)):
+    kind = type(func).__name__
+    raise TypeError(
+      f"@kinetic.run cannot wrap a {kind} object. Apply @kinetic.run below "
+      f"@{kind}:\n"
+      f"  @{kind}\n"
+      f"  @kinetic.run(...)\n"
+      f"  def my_func(...): ...\n"
+      f"Applying it above @{kind} submits a job that cannot run on the pod."
+    )
+  # Deliberately type-specific guards: the generic unpicklable case is
+  # already caught at submit time by save_payload's bisection (which names
+  # the offending component). These exist to fail at decoration time with
+  # remediation advice — "reorder your decorators" — that only a
+  # type-specific check can give. Duck-typed so functools.cache and
+  # third-party cache decorators with the same interface are caught too.
+  if hasattr(func, "cache_clear") and hasattr(func, "cache_info"):
+    raise TypeError(
+      "@kinetic.run cannot wrap a functools.lru_cache/functools.cache "
+      "wrapper: the cache object is not serializable, and a cache is "
+      "meaningless remotely because every job runs in a fresh process. "
+      "Decorate the undecorated function with @kinetic.run instead (and "
+      "apply the cache to a local callable if you still want it locally)."
+    )
+  if not callable(func):
+    raise TypeError(
+      f"@kinetic.run expected a callable, got {type(func).__name__}"
+    )
+
+
+def _ensure_func_name(func):
+  """Guarantee ``func.__name__`` exists before the function is submitted.
+
+  The job display name is built from ``func.__name__`` at submit time, so a
+  functools.partial or a callable instance used to raise AttributeError on
+  the first call. Set a synthetic name in place when the object accepts
+  attributes; refuse at decoration time when it does not.
+  """
+  if isinstance(getattr(func, "__name__", None), str):
+    return func
+  try:
+    func.__name__ = _safe_func_name(func)
+  except (AttributeError, TypeError) as e:
+    raise TypeError(
+      f"@kinetic.run received a {type(func).__name__} object with no "
+      "__name__ attribute, and one cannot be set on it. Wrap the call in a "
+      "plain function and decorate that instead:\n"
+      "  @kinetic.run(...)\n"
+      "  def my_job(...):\n"
+      "    return the_callable(...)"
+    ) from e
+  return func
 
 
 def _require_interactive_terminal():
@@ -208,6 +372,24 @@ class RemoteCallable(Generic[P, R]):
   def __call__(self, *args: P.args, **kwargs: P.kwargs) -> R:
     """Synchronous execution (blocks)."""
     return self._sync_wrapper(*args, **kwargs)
+
+  def __reduce__(self):
+    """Pickle as the plain wrapped function, dropping the kinetic wrapper.
+
+    Anything that references a decorated callable — a class whose body
+    defines one, or an instance of such a class passed as an argument —
+    would otherwise pull `kinetic.*` module globals into the payload
+    through the submit closures, and the job image does not contain the
+    kinetic package, so the pod dies at unpickle time.
+
+    Semantics on the pod: the attribute is the undecorated function, so
+    calling it there runs the body in the pod process instead of
+    submitting another job (nested submission is not supported).
+    """
+    # The reconstructor must be importable on the pod, which only has the
+    # standard library plus the job's own dependencies — hence operator
+    # rather than a kinetic-level identity helper.
+    return (operator.itemgetter(0), ((self._func,),))
 
   def run_async(self, *args: P.args, **kwargs: P.kwargs) -> JobHandle:
     """Submit the decorated function for remote execution without blocking.
@@ -362,7 +544,12 @@ def run(
     project: GCP project. Falls back to KINETIC_PROJECT, then the active
       profile's project, then GOOGLE_CLOUD_PROJECT.
     capture_env_vars: List of environment variable names or patterns (ending in `*`)
-      to propagate to the remote environment. Defaults to None.
+      to propagate to the remote environment. Defaults to None. Wildcard
+      patterns never capture process-critical variables such as `PATH`,
+      `HOME`, `PYTHONPATH`, `VIRTUAL_ENV` or `KERAS_BACKEND` (overriding
+      the pod's own values breaks the runtime); name one exactly to
+      capture it anyway. Captured values are stored in the job payload in
+      the job bucket, so avoid sweeping credentials in with a wildcard.
     cluster: GKE cluster name. Falls back to KINETIC_CLUSTER, then the
       active profile's cluster, then the built-in default.
     backend: Backend to use ('gke' or 'pathways')
@@ -388,6 +575,11 @@ def run(
       and returns a `JobHandle` immediately (async mode).
     - `run_async_map(inputs, **kwargs)`: Fans out across accelerators
       for a collection of inputs, returning a `BatchHandle`.
+
+  Raises:
+    TypeError: If the decorated object is a `classmethod`/`staticmethod`
+      object (apply `@kinetic.run` below those), a `functools.lru_cache`
+      wrapper, or not callable at all.
   """
   _validate_volumes(volumes)
 
@@ -399,6 +591,9 @@ def run(
     )
 
   def decorator(func: Callable[P, R]) -> RemoteCallable[P, R]:
+    _validate_decorated_callable(func)
+    func = _ensure_func_name(func)
+
     # Create the sync wrapper
     sync_decorator = _make_decorator(
       accelerator,
