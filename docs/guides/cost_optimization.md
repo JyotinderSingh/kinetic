@@ -122,7 +122,7 @@ kinetic pool add --accelerator h100 --reservation my-h100-reservation
 ```
 
 :::{note}
-You cannot mix `--spot` pricing with `--reservation`. To utilize a reservation, your node pools must use standard on-demand billing tiers. For more details, consult the online [Reservations Reference Guide](https://kinetic.readthedocs.io/en/latest/advanced/reservations.html).
+You cannot mix `--spot` pricing with `--reservation`. To utilize a reservation, your node pools must use standard on-demand billing tiers. For more details, see [Capacity Reservations](reservations.md).
 :::
 
 ---

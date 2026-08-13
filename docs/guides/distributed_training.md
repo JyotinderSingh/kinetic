@@ -4,7 +4,7 @@
 :class: note
 
 Users whose model or batch size has outgrown a
-single TPU host. Kinetic + the [Pathways](https://cloud.google.com/tpu/docs/pathways-overview)
+single TPU host. Kinetic + the [Pathways](https://cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/pathways-intro)
 backend lets you treat a multi-host TPU slice as one logical machine,
 without writing your own multi-process JAX coordination.
 :::
