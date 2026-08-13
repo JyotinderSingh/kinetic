@@ -1,10 +1,14 @@
 # Training Keras Models
 
-**Who this is for:** anyone with a working Keras training script who wants
+:::{admonition} Who this is for
+:class: note
+
+Anyone with a working Keras training script who wants
 it to run on a cloud TPU or GPU without standing up infrastructure.
 Kinetic ships your existing `model.compile()` / `model.fit()` code to a
 remote accelerator with a single decorator change. You don't need to
 restructure your training loop.
+:::
 
 ## A first run
 
@@ -121,14 +125,47 @@ access patterns.
 
 ## Next steps
 
-- [`fashion_mnist.py`](../examples.md) — full working example with a real
-  dataset (first entry under Quickstart).
-- [Checkpointing](../guides/checkpointing.md) — persist model weights and resume
-  across runs.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`rocket;1em` fashion_mnist.py
+:link: ../examples
+:link-type: doc
+
+Full working example with a real dataset (first entry under Quickstart).
+:::
+
+:::{grid-item-card} {octicon}`history;1em` Checkpointing
+:link: ../guides/checkpointing
+:link-type: doc
+
+Persist model weights and resume across runs.
+:::
+::::
 
 ## Related pages
 
-- [Data](../guides/data.md) — shipping local files and reading from GCS.
-- [Checkpointing](../guides/checkpointing.md) — `KINETIC_OUTPUT_DIR` and resumable
-  training.
-- [LLM Fine-tuning](llm_finetuning.md) — KerasHub + Gemma walkthrough.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`database;1em` Data
+:link: ../guides/data
+:link-type: doc
+
+Shipping local files and reading from GCS.
+:::
+
+:::{grid-item-card} {octicon}`history;1em` Checkpointing
+:link: ../guides/checkpointing
+:link-type: doc
+
+`KINETIC_OUTPUT_DIR` and resumable training.
+:::
+
+:::{grid-item-card} {octicon}`cpu;1em` LLM Fine-tuning
+:link: llm_finetuning
+:link-type: doc
+
+KerasHub + Gemma walkthrough.
+:::
+::::

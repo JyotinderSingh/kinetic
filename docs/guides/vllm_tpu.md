@@ -29,11 +29,15 @@ Kinetic will detect this file and build a container with vLLM installed.
 
 You must pass the following environment variables to ensure correct execution:
 
--   `VLLM_TARGET_DEVICE="tpu"`: Tells vLLM to target TPU.
--   `VLLM_USE_V1="0"`: Forces vLLM to use the stable v0 engine (recommended for TPU currently).
--   `JAX_PLATFORMS="tpu,cpu"`: Allows JAX to see both TPU and CPU backends, avoiding initialization crashes.
+| Variable | Purpose |
+|----------|---------|
+| `VLLM_TARGET_DEVICE="tpu"` | Tells vLLM to target TPU. |
+| `VLLM_USE_V1="0"` | Forces vLLM to use the stable v0 engine (recommended for TPU currently). |
+| `JAX_PLATFORMS="tpu,cpu"` | Allows JAX to see both TPU and CPU backends, avoiding initialization crashes. |
 
+:::{tip}
 You can use `capture_env_vars` in the `@kinetic.run` decorator to pass these from your local environment.
+:::
 
 ## Example
 

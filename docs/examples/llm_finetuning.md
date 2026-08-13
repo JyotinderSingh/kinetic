@@ -58,10 +58,27 @@ See the [Distributed Training](../guides/distributed_training.md) guide for more
 
 ## Related pages
 
-- [Distributed Training](../guides/distributed_training.md) — multi-host
-  Pathways setup that LLM fine-tuning typically needs.
-- [Checkpointing](../guides/checkpointing.md) — Orbax + `KINETIC_OUTPUT_DIR`
-  for resumable fine-tuning runs.
-- [Examples](../examples.md) — the Gemma SFT examples are full
-  end-to-end LLM fine-tuning walkthroughs.
-throughs.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`server;1em` Distributed Training
+:link: ../guides/distributed_training
+:link-type: doc
+
+Multi-host Pathways setup that LLM fine-tuning typically needs.
+:::
+
+:::{grid-item-card} {octicon}`history;1em` Checkpointing
+:link: ../guides/checkpointing
+:link-type: doc
+
+Orbax + `KINETIC_OUTPUT_DIR` for resumable fine-tuning runs.
+:::
+
+:::{grid-item-card} {octicon}`book;1em` Examples
+:link: ../examples
+:link-type: doc
+
+The Gemma SFT examples are full end-to-end LLM fine-tuning walkthroughs.
+:::
+::::

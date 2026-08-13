@@ -81,19 +81,40 @@ Kinetic automatically sets some environment variables in the remote worker envir
 
 - `KINETIC_OUTPUT_DIR`: The path to the directory where outputs should be saved. By default, this is a GCS path pointing to `gs://{bucket_name}/outputs/{job_id}`. This is useful for passing to checkpointing libraries like Orbax.
 
-> **Important**: By default, Kinetic imposes a 30-day TTL (Time to Live) on the
-> GCS buckets it creates. This means anything written to the default
-> `KINETIC_OUTPUT_DIR` will be automatically deleted after 30 days. If you need
-> to preserve outputs longer, you should copy them to a bucket without a
-> lifecycle rule or specify a custom `output_dir` pointing to a different
-> location.
+:::{important}
+By default, Kinetic imposes a 30-day TTL (Time to Live) on the
+GCS buckets it creates. This means anything written to the default
+`KINETIC_OUTPUT_DIR` will be automatically deleted after 30 days. If you need
+to preserve outputs longer, you should copy them to a bucket without a
+lifecycle rule or specify a custom `output_dir` pointing to a different
+location.
+:::
 
 ## Related pages
 
-- [Configuration](../configuration.md) — full list of `KINETIC_*`
-  variables and precedence rules.
-- [Checkpointing](checkpointing.md) — how `KINETIC_OUTPUT_DIR` fits
-  into the durable-output story.
-- [LLM Fine-tuning](../examples/llm_finetuning.md) — `capture_env_vars` is the
-  canonical way to forward Kaggle and other model-hub credentials.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`gear;1em` Configuration
+:link: ../configuration
+:link-type: doc
+
+Full list of `KINETIC_*` variables and precedence rules.
+:::
+
+:::{grid-item-card} {octicon}`history;1em` Checkpointing
+:link: checkpointing
+:link-type: doc
+
+How `KINETIC_OUTPUT_DIR` fits into the durable-output story.
+:::
+
+:::{grid-item-card} {octicon}`key;1em` LLM Fine-tuning
+:link: ../examples/llm_finetuning
+:link-type: doc
+
+`capture_env_vars` is the canonical way to forward Kaggle and other
+model-hub credentials.
+:::
+::::
 

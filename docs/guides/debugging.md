@@ -33,17 +33,19 @@ train()
 
 When you call `train()`, Kinetic:
 
-1. Schedules the pod with debugging enabled and an extended **2-hour**
+:::{container} kinetic-steps
+1. **Schedules the pod** with debugging enabled and an extended **2-hour**
    TTL (vs 10 minutes for normal jobs) so the session has time to
    breathe.
-2. Pauses execution just before your function runs and waits for a
+2. **Pauses execution** just before your function runs and waits for a
    debugger to attach.
-3. Prints a VS Code `launch.json` snippet to your terminal — paste it
+3. **Prints a VS Code `launch.json` snippet** to your terminal — paste it
    into `.vscode/launch.json`.
-4. Press **F5** (Run → Start Debugging) in your editor. The debugger
+4. **Press F5** (Run → Start Debugging) in your editor. The debugger
    attaches and pauses inside Kinetic's runner. Press **F11** to step
    into your function, or **F10** to run straight through to your own
    `breakpoint()`.
+:::
 
 When your function returns, the debugger connection is torn down
 automatically and the pod cleans up.
@@ -169,9 +171,29 @@ you're ready.
 
 ## Related pages
 
-- [Detached Jobs](async_jobs.md) — pairs with
-  `kinetic jobs debug <job_id>` for long debug sessions.
-- [Configuration](../configuration.md) — `KINETIC_DEBUG_WAIT_TIMEOUT`
-  and the other user-facing environment variables.
-- [Troubleshooting](../troubleshooting.md) — what to check when a pod
-  doesn't reach `RUNNING` or the debugger fails to attach.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`history;1em` Detached Jobs
+:link: async_jobs
+:link-type: doc
+
+Pairs with `kinetic jobs debug <job_id>` for long debug sessions.
+:::
+
+:::{grid-item-card} {octicon}`gear;1em` Configuration
+:link: ../configuration
+:link-type: doc
+
+`KINETIC_DEBUG_WAIT_TIMEOUT` and the other user-facing environment
+variables.
+:::
+
+:::{grid-item-card} {octicon}`bug;1em` Troubleshooting
+:link: ../troubleshooting
+:link-type: doc
+
+What to check when a pod doesn't reach `RUNNING` or the debugger fails
+to attach.
+:::
+::::

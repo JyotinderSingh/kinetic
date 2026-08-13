@@ -153,32 +153,44 @@ that gets uploaded to the build.
 
 You have two practical options:
 
-- **Bundled mode with the index URL inside `requirements.txt`.** Add
-  `--index-url` or `--extra-index-url` as a line in `requirements.txt`.
-  The installer reads these directives and uses them when resolving
-  every package in the file:
+::::{tab-set}
 
-  ```text
-  --extra-index-url https://my-org-private-index.example.com/simple
-  my-private-package==1.2.3
-  some-public-dep==2.0.0
-  ```
+:::{tab-item} Bundled mode with an index URL
 
-  This works without extra setup if the index is publicly reachable
-  (no auth required), or if it sits behind network ACLs that the Cloud
-  Build pool already satisfies (for example, a GCP-internal Artifact
-  Registry repo that the build service account has read access to).
-- **Custom image mode.** If your private packages need credentials at
-  install time, system libraries, or unusual build flags, prebuild a
-  container image with them installed and pass it as
-  `container_image="<your-image-uri>"`. This gives you full control
-  over the build environment, including `pip.conf`, secret mounts, and
-  `gcloud` authentication. See [Container Images](containers.md).
+Add `--index-url` or `--extra-index-url` as a line in
+`requirements.txt`. The installer reads these directives and uses them
+when resolving every package in the file:
 
+```text
+--extra-index-url https://my-org-private-index.example.com/simple
+my-private-package==1.2.3
+some-public-dep==2.0.0
+```
+
+This works without extra setup if the index is publicly reachable
+(no auth required), or if it sits behind network ACLs that the Cloud
+Build pool already satisfies (for example, a GCP-internal Artifact
+Registry repo that the build service account has read access to).
+:::
+
+:::{tab-item} Custom image mode
+
+If your private packages need credentials at install time, system
+libraries, or unusual build flags, prebuild a container image with
+them installed and pass it as `container_image="<your-image-uri>"`.
+This gives you full control over the build environment, including
+`pip.conf`, secret mounts, and `gcloud` authentication. See
+[Container Images](containers.md).
+:::
+
+::::
+
+:::{warning}
 Avoid embedding secrets in `requirements.txt`
 (`https://user:token@host/...`); the file is uploaded to GCS and used
 as part of the build context, so any credentials it contains will end
 up in build logs and cached artifacts.
+:::
 
 ## Common dependency pitfalls
 
@@ -211,10 +223,35 @@ up in build logs and cached artifacts.
 
 ## Related pages
 
-- [What Ships to the Pod](packaging.md) — the package root, and why the
-  dependency file can sit outside the archive.
-- [Execution Modes](execution_modes.md) — where the discovered deps go.
-- [Container Images](containers.md) — custom image and
-  base-image workflows.
-- [Troubleshooting](../troubleshooting.md) — what to check when an
-  import fails on the remote.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`package;1em` What Ships to the Pod
+:link: packaging
+:link-type: doc
+
+The package root, and why the dependency file can sit outside the
+archive.
+:::
+
+:::{grid-item-card} {octicon}`zap;1em` Execution Modes
+:link: execution_modes
+:link-type: doc
+
+Where the discovered deps go.
+:::
+
+:::{grid-item-card} {octicon}`stack;1em` Container Images
+:link: containers
+:link-type: doc
+
+Custom image and base-image workflows.
+:::
+
+:::{grid-item-card} {octicon}`bug;1em` Troubleshooting
+:link: ../troubleshooting
+:link-type: doc
+
+What to check when an import fails on the remote.
+:::
+::::

@@ -1,11 +1,15 @@
 # Native JAX Training
 
-**Who this is for:** users who write training loops directly in JAX
+:::{admonition} Who this is for
+:class: note
+
+Users who write training loops directly in JAX
 rather than going through Keras. Kinetic runs your JAX code on cloud
 TPUs and GPUs the same way it runs Keras code — wrap the function in
 `@kinetic.run()` and call it. JAX-specific details (multi-device
 parallelism, dependency filtering, multi-host coordination) are covered
 below.
+:::
 
 ## A first run
 
@@ -158,15 +162,47 @@ access patterns.
 
 ## Next steps
 
-- [Distributed Training](../guides/distributed_training.md) — multi-host JAX with
-  Pathways.
-- [Checkpointing](../guides/checkpointing.md) — Orbax checkpoint patterns under
-  `KINETIC_OUTPUT_DIR`.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`server;1em` Distributed Training
+:link: ../guides/distributed_training
+:link-type: doc
+
+Multi-host JAX with Pathways.
+:::
+
+:::{grid-item-card} {octicon}`history;1em` Checkpointing
+:link: ../guides/checkpointing
+:link-type: doc
+
+Orbax checkpoint patterns under `KINETIC_OUTPUT_DIR`.
+:::
+::::
 
 ## Related pages
 
-- [Distributed Training](../guides/distributed_training.md) — Pathways and
-  multi-host coordination.
-- [Dependencies](../guides/dependencies.md) — JAX filtering and what gets
-  installed.
-- [Checkpointing](../guides/checkpointing.md) — Orbax + `KINETIC_OUTPUT_DIR`.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`server;1em` Distributed Training
+:link: ../guides/distributed_training
+:link-type: doc
+
+Pathways and multi-host coordination.
+:::
+
+:::{grid-item-card} {octicon}`package;1em` Dependencies
+:link: ../guides/dependencies
+:link-type: doc
+
+JAX filtering and what gets installed.
+:::
+
+:::{grid-item-card} {octicon}`history;1em` Checkpointing
+:link: ../guides/checkpointing
+:link-type: doc
+
+Orbax + `KINETIC_OUTPUT_DIR`.
+:::
+::::

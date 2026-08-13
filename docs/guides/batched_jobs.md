@@ -441,13 +441,36 @@ list or as exception objects when `return_exceptions=True`.
 
 ## Related pages
 
-- [Detached Jobs](async_jobs.md) — the single-job `run_async()`
-  workflow each child of a batch is built on.
-- [Cost Optimization](../guides/cost_optimization.md) — fan-out
-  amplifies both throughput and spend; concurrency limits and spot
-  instances matter here.
-- [Checkpointing](../guides/checkpointing.md) — each child writes to
-  its own `KINETIC_OUTPUT_DIR`; useful for long per-job work inside a
-  batch.
-- [Troubleshooting](../troubleshooting.md) — what to do when children
-  stick in `PENDING` or repeatedly fail.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`clock;1em` Detached Jobs
+:link: async_jobs
+:link-type: doc
+
+The single-job `run_async()` workflow each child of a batch is built on.
+:::
+
+:::{grid-item-card} {octicon}`zap;1em` Cost Optimization
+:link: cost_optimization
+:link-type: doc
+
+Fan-out amplifies both throughput and spend; concurrency limits and spot
+instances matter here.
+:::
+
+:::{grid-item-card} {octicon}`history;1em` Checkpointing
+:link: checkpointing
+:link-type: doc
+
+Each child writes to its own `KINETIC_OUTPUT_DIR`; useful for long
+per-job work inside a batch.
+:::
+
+:::{grid-item-card} {octicon}`bug;1em` Troubleshooting
+:link: ../troubleshooting
+:link-type: doc
+
+What to do when children stick in `PENDING` or repeatedly fail.
+:::
+::::

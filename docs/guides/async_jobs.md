@@ -111,18 +111,25 @@ What each state means and what to do:
 
 The full submit-to-cleanup flow:
 
-1. `run_async()` packages your code, builds (or reuses) a container image,
+:::{container} kinetic-steps
+1. **Submit.**
+   `run_async()` packages your code, builds (or reuses) a container image,
    uploads artifacts to GCS, creates a k8s Job, and returns a `JobHandle`.
    Status is `PENDING`.
-2. The cluster autoscaler provisions a node if needed; the pod is
+2. **Schedule.**
+   The cluster autoscaler provisions a node if needed; the pod is
    scheduled. Status moves to `RUNNING`.
-3. Your function runs. The pod uploads its return value (or an exception
+3. **Execute.**
+   Your function runs. The pod uploads its return value (or an exception
    payload) to GCS when it exits.
-4. Status moves to `SUCCEEDED` or `FAILED`.
-5. Calling `job.result()` downloads the payload, returns it (or raises
+4. **Finish.**
+   Status moves to `SUCCEEDED` or `FAILED`.
+5. **Collect and clean up.**
+   Calling `job.result()` downloads the payload, returns it (or raises
    the user exception), and — by default — deletes both the k8s resource
    and the GCS artifacts. Status is now `NOT_FOUND` and the handle is
    spent.
+:::
 
 ## Reattaching from another machine
 
@@ -202,8 +209,27 @@ hours.
 
 ## Related pages
 
-- [Checkpointing](../guides/checkpointing.md) — make long jobs resumable.
-- [Cost Optimization](../guides/cost_optimization.md) — spot instances and
-  scale-to-zero behavior for detached workloads.
-- [Troubleshooting](../troubleshooting.md) — what to do when a job is
-  stuck in `PENDING` or repeatedly failing.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`history;1em` Checkpointing
+:link: checkpointing
+:link-type: doc
+
+Make long jobs resumable.
+:::
+
+:::{grid-item-card} {octicon}`zap;1em` Cost Optimization
+:link: cost_optimization
+:link-type: doc
+
+Spot instances and scale-to-zero behavior for detached workloads.
+:::
+
+:::{grid-item-card} {octicon}`bug;1em` Troubleshooting
+:link: ../troubleshooting
+:link-type: doc
+
+What to do when a job is stuck in `PENDING` or repeatedly failing.
+:::
+::::

@@ -6,10 +6,12 @@ arbitrary code execution, understanding the security boundaries is critical.
 
 ## The Security Boundary
 
+:::{important}
 **Kinetic assumes that any user authorized to submit jobs is a trusted
 entity.** If a user is granted the IAM permissions to upload to the Kinetic GCS
 buckets and the Kubernetes RBAC permissions to create Jobs/Pods, they have the
 ability to execute arbitrary code on the cluster.
+:::
 
 Kinetic **does not** attempt to sandbox, restrict, or monitor the Python code
 written by authorized users. Securing the cluster against authorized users must

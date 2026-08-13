@@ -139,13 +139,19 @@ def train(extra_data): ...
 train(Data("./labels.csv"))  # downloaded function-argument data
 ```
 
-**Prerequisites:** FUSE mounting needs the GCS FUSE CSI driver addon on
-the GKE cluster. `kinetic up` enables it by default.
+:::{admonition} Prerequisites
+:class: important
 
+FUSE mounting needs the GCS FUSE CSI driver addon on
+the GKE cluster. `kinetic up` enables it by default.
+:::
+
+:::{seealso}
 For a runnable end-to-end walkthrough covering volume mounts, single
 files, multiple FUSE volumes, and mixed FUSE/downloaded data in the same
 job, see
 [`examples/example_fuse.py`](https://github.com/keras-team/kinetic/blob/main/examples/example_fuse.py).
+:::
 
 ## How it caches
 
@@ -160,10 +166,30 @@ payload — no redundant upload of the same bytes.
 
 ## Related pages
 
-- [Checkpointing](checkpointing.md): durable outputs and `KINETIC_OUTPUT_DIR`.
-- [Examples](../examples.md): walks through the Data API end-to-end.
-- [Cost Optimization](cost_optimization.md): FUSE vs download tradeoffs
-  for repeated jobs.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`history;1em` Checkpointing
+:link: checkpointing
+:link-type: doc
+
+Durable outputs and `KINETIC_OUTPUT_DIR`.
+:::
+
+:::{grid-item-card} {octicon}`beaker;1em` Examples
+:link: ../examples
+:link-type: doc
+
+Walks through the Data API end-to-end.
+:::
+
+:::{grid-item-card} {octicon}`graph;1em` Cost Optimization
+:link: cost_optimization
+:link-type: doc
+
+FUSE vs download tradeoffs for repeated jobs.
+:::
+::::
 
 ---
 
@@ -222,12 +248,17 @@ hash the replacement dict:
 Local data is uploaded to `gs://{bucket}/{namespace}/data-cache/{hash}/`,
 where `{hash}` is a SHA-256 computed over sorted file contents. The flow:
 
-1. Compute content hash (deterministic: sorted DFS order, per-file
-   SHA-256, then combined).
-2. Check for a sentinel blob at `{namespace}/data-markers/{hash}` — if
+:::{container} kinetic-steps
+1. **Compute content hash.**
+   Deterministic: sorted DFS order, per-file SHA-256, then combined.
+
+2. **Check for a sentinel blob** at `{namespace}/data-markers/{hash}` — if
    present, skip upload.
-3. Upload files preserving directory structure under the hash prefix.
-4. Write the sentinel blob last to signal upload-complete.
+
+3. **Upload files** preserving directory structure under the hash prefix.
+
+4. **Write the sentinel blob** last to signal upload-complete.
+:::
 
 For single files, the blob is stored at `{hash}/{filename}`. For
 directories, the full tree is preserved under `{hash}/`. The returned

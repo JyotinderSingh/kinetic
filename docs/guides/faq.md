@@ -194,6 +194,27 @@ keep after the pod exits.
 
 ## Related pages
 
-- [Execution Modes](execution_modes.md): bundled vs prebuilt vs custom.
-- [Troubleshooting](../troubleshooting.md): symptom-first debugging.
-- [Getting Started](../getting_started.md): your first run, end-to-end.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`gear;1em` Execution Modes
+:link: execution_modes
+:link-type: doc
+
+Bundled vs prebuilt vs custom.
+:::
+
+:::{grid-item-card} {octicon}`bug;1em` Troubleshooting
+:link: ../troubleshooting
+:link-type: doc
+
+Symptom-first debugging.
+:::
+
+:::{grid-item-card} {octicon}`rocket;1em` Getting Started
+:link: ../getting_started
+:link-type: doc
+
+Your first run, end-to-end.
+:::
+::::

@@ -1,6 +1,8 @@
 # Accelerator Support
 
+:::{important}
 Each accelerator and topology requires setting up its own node pool as a prerequisite.
+:::
 
 ## TPUs
 
@@ -39,13 +41,33 @@ Newer accelerators (TPU v6e, H100) can have limited on-demand availability. If `
 kinetic pool add --accelerator tpu-v6e-8 --reservation my-v6e-reservation --project your-project-id
 ```
 
+:::{seealso}
 See the [Capacity Reservations](guides/reservations.md) guide for details.
+:::
 
 ## Related pages
 
-- [Cost Optimization](guides/cost_optimization.md) — spot vs
-  reservations vs on-demand for each accelerator class.
-- [Distributed Training](guides/distributed_training.md) — which
-  TPU topologies are multi-host and need Pathways.
-- [Multiple Clusters](guides/clusters.md) — when to put accelerator
-  pools in separate clusters.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`graph;1em` Cost Optimization
+:link: guides/cost_optimization
+:link-type: doc
+
+Spot vs reservations vs on-demand for each accelerator class.
+:::
+
+:::{grid-item-card} {octicon}`cpu;1em` Distributed Training
+:link: guides/distributed_training
+:link-type: doc
+
+Which TPU topologies are multi-host and need Pathways.
+:::
+
+:::{grid-item-card} {octicon}`server;1em` Multiple Clusters
+:link: guides/clusters
+:link-type: doc
+
+When to put accelerator pools in separate clusters.
+:::
+::::

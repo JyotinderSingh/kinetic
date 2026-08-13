@@ -4,6 +4,9 @@ This page is organized by symptom rather than by error message. Locate
 the section that best matches what you are observing and follow the
 guidance there.
 
+:::{admonition} Quick diagnostic
+:class: tip
+
 For a quick diagnostic of common environment problems, run:
 
 ```bash
@@ -16,6 +19,7 @@ concrete fix command for each failed check. `kinetic init` will also
 offer this path automatically when it detects that prerequisites are
 missing. The full list of categories the troubleshoot path covers is
 described at the end of this page.
+:::
 
 ## Startup and build issues
 
@@ -393,9 +397,35 @@ fixes, the troubleshoot path prints a copy-paste command block.
 
 ## Related pages
 
-- [Getting Started](getting_started.md) — first-run setup that
-  shouldn't have to fail twice.
-- [What Ships to the Pod](guides/packaging.md) — the packaging contract
-  behind most import failures and most failures of a file path.
-- [FAQ](guides/faq.md) — quick answers to common conceptual confusions.
-- [Configuration](configuration.md) — env vars and precedence.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`rocket;1em` Getting Started
+:link: getting_started
+:link-type: doc
+
+First-run setup that shouldn't have to fail twice.
+:::
+
+:::{grid-item-card} {octicon}`file-directory;1em` What Ships to the Pod
+:link: guides/packaging
+:link-type: doc
+
+The packaging contract behind most import failures and most failures
+of a file path.
+:::
+
+:::{grid-item-card} {octicon}`book;1em` FAQ
+:link: guides/faq
+:link-type: doc
+
+Quick answers to common conceptual confusions.
+:::
+
+:::{grid-item-card} {octicon}`gear;1em` Configuration
+:link: configuration
+:link-type: doc
+
+Env vars and precedence.
+:::
+::::

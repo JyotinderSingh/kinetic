@@ -5,9 +5,11 @@ optionally [named profiles](guides/profiles.md) for configuration. This
 page is the source of truth for what each one does, what the defaults
 are, and how they come together when they disagree.
 
+:::{tip}
 If you work with more than one cluster or project, consider saving
 those combinations as [profiles](guides/profiles.md) — they remove the
 need to re-export `KINETIC_*` env vars each time you switch.
+:::
 
 ## Environment variables
 
@@ -113,11 +115,35 @@ KINETIC_`.
 
 ## Related pages
 
-- [Getting Started](getting_started.md) — sets the canonical
-  `KINETIC_PROJECT` once.
-- [Profiles](guides/profiles.md) — named bundles for
-  project/zone/cluster/namespace; the ergonomic alternative to
-  re-exporting env vars when you target multiple clusters.
-- [CLI Reference](cli.rst) — generated reference for every flag.
-- [Troubleshooting](troubleshooting.md) — what to check when a setting
-  doesn't take effect.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`rocket;1em` Getting Started
+:link: getting_started
+:link-type: doc
+
+Sets the canonical `KINETIC_PROJECT` once.
+:::
+
+:::{grid-item-card} {octicon}`stack;1em` Profiles
+:link: guides/profiles
+:link-type: doc
+
+Named bundles for project/zone/cluster/namespace; the ergonomic
+alternative to re-exporting env vars when you target multiple clusters.
+:::
+
+:::{grid-item-card} {octicon}`terminal;1em` CLI Reference
+:link: cli
+:link-type: doc
+
+Generated reference for every flag.
+:::
+
+:::{grid-item-card} {octicon}`bug;1em` Troubleshooting
+:link: troubleshooting
+:link-type: doc
+
+What to check when a setting doesn't take effect.
+:::
+::::

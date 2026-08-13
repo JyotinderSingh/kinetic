@@ -29,13 +29,26 @@ This guide covers the primary configurations and workflows for optimizing your c
 By default, Kinetic provisions accelerator node pools with **scale-to-zero** capability. 
 
 ### How it works:
-- **Job Submission:** When you invoke a remote function (via the `@kinetic.run()` decorator), Kinetic creates a Kubernetes `Job` on your GKE cluster.
-- **Provisioning:** The GKE Cluster Autoscaler detects pending pods and spins up the required GPU/TPU virtual machines to support the job.
-- **Execution & Termination:** Once your workload terminates (either successfully or due to an exception), the container exits and the pod goes away.
-- **Scaling Down:** After the pod terminates, if no new jobs are submitted within the GKE idle window (typically around 10 minutes by default in GCP), the Cluster Autoscaler automatically shuts down the underlying VM instances, returning your accelerator compute consumption to zero.
 
-> [!IMPORTANT]
-> Because the cluster control plane runs continuously, you will incur a baseline management fee of ~$0.10/hour per cluster. However, Google Cloud provides a [monthly free tier credit](https://cloud.google.com/kubernetes-engine/pricing) ($74.40/month) per billing account, which fully covers the management costs of exactly **one** active cluster. 
+:::{container} kinetic-steps
+1. **Job Submission:** When you invoke a remote function (via the
+   `@kinetic.run()` decorator), Kinetic creates a Kubernetes `Job` on
+   your GKE cluster.
+2. **Provisioning:** The GKE Cluster Autoscaler detects pending pods and
+   spins up the required GPU/TPU virtual machines to support the job.
+3. **Execution & Termination:** Once your workload terminates (either
+   successfully or due to an exception), the container exits and the pod
+   goes away.
+4. **Scaling Down:** After the pod terminates, if no new jobs are
+   submitted within the GKE idle window (typically around 10 minutes by
+   default in GCP), the Cluster Autoscaler automatically shuts down the
+   underlying VM instances, returning your accelerator compute
+   consumption to zero.
+:::
+
+:::{important}
+Because the cluster control plane runs continuously, you will incur a baseline management fee of ~$0.10/hour per cluster. However, Google Cloud provides a [monthly free tier credit](https://cloud.google.com/kubernetes-engine/pricing) ($74.40/month) per billing account, which fully covers the management costs of exactly **one** active cluster.
+:::
 
 ---
 
@@ -108,8 +121,9 @@ If your Google Cloud project leverages centralized enterprise pricing via **On-D
 kinetic pool add --accelerator h100 --reservation my-h100-reservation
 ```
 
-> [!NOTE]
-> You cannot mix `--spot` pricing with `--reservation`. To utilize a reservation, your node pools must use standard on-demand billing tiers. For more details, consult the online [Reservations Reference Guide](https://kinetic.readthedocs.io/en/latest/advanced/reservations.html).
+:::{note}
+You cannot mix `--spot` pricing with `--reservation`. To utilize a reservation, your node pools must use standard on-demand billing tiers. For more details, consult the online [Reservations Reference Guide](https://kinetic.readthedocs.io/en/latest/advanced/reservations.html).
+:::
 
 ---
 
@@ -123,10 +137,28 @@ kinetic pool add --accelerator h100 --reservation my-h100-reservation
 
 ## Related pages
 
-- [Execution Modes](execution_modes.md) — bundled vs prebuilt
-  tradeoffs when build cost matters.
-- [Capacity Reservations](reservations.md) — guaranteed
-  capacity for newer accelerators.
-- [Multiple Clusters](clusters.md) — when separate
-  control planes are worth the extra ~$0.10/hr.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`package;1em` Execution Modes
+:link: execution_modes
+:link-type: doc
+
+Bundled vs prebuilt tradeoffs when build cost matters.
+:::
+
+:::{grid-item-card} {octicon}`checklist;1em` Capacity Reservations
+:link: reservations
+:link-type: doc
+
+Guaranteed capacity for newer accelerators.
+:::
+
+:::{grid-item-card} {octicon}`server;1em` Multiple Clusters
+:link: clusters
+:link-type: doc
+
+When separate control planes are worth the extra ~$0.10/hr.
+:::
+::::
 

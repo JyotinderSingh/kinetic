@@ -35,6 +35,7 @@ version = ""
 extensions = [
   "myst_nb",
   "sphinx_click",
+  "sphinx_copybutton",
   "sphinx_design",
   "sphinx.ext.intersphinx",
   "sphinx.ext.napoleon",
@@ -59,6 +60,8 @@ exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 # -- Options for HTML output
 
 html_theme = "sphinx_book_theme"
+html_title = "Kinetic"
+html_favicon = "_static/logo.svg"
 html_theme_options = {
   "analytics": {
     "google_analytics_id": "G-134NR8C6KG",
@@ -66,13 +69,27 @@ html_theme_options = {
   "show_toc_level": 2,
   "repository_url": "https://github.com/keras-team/kinetic",
   "use_repository_button": True,
+  "use_download_button": False,
+  "use_fullscreen_button": False,
   "navigation_with_keys": False,
   "show_navbar_depth": 1,
+  "pygments_light_style": "github-light",
+  "pygments_dark_style": "github-dark",
+  "toc_title": "On this page",
+  "logo": {
+    "text": "⚡ Kinetic",
+  },
 }
 html_static_path = ["_static"]
 html_css_files = [
+  "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap",
   "custom.css",
 ]
+
+# -- Copy button: strip prompts and console output when copying
+copybutton_exclude = ".linenos, .gp, .go"
+copybutton_prompt_text = r">>> |\.\.\. |\$ "
+copybutton_prompt_is_regexp = True
 
 # -- Options for EPUB output
 epub_show_urls = "footnote"

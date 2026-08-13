@@ -57,12 +57,16 @@ kinetic down --cluster=gpu-cluster
 
 Kinetic uses the cluster name to scope its GCP resources. For a cluster named `gpu-cluster`, the resources will follow this pattern:
 
-- **GKE Cluster**: `gpu-cluster`
-- **Artifact Registry**: `kn-gpu-cluster`
-- **Storage Bucket**: `{project}-kn-gpu-cluster-jobs`
+| Resource | Name |
+| --- | --- |
+| GKE Cluster | `gpu-cluster` |
+| Artifact Registry | `kn-gpu-cluster` |
+| Storage Bucket | `{project}-kn-gpu-cluster-jobs` |
 
-:::{warning}
-**When not to use this:** most users only need one cluster.
+:::{admonition} When not to use this
+:class: warning
+
+Most users only need one cluster.
 Each additional cluster has its own GKE control plane (~$0.10/hr,
 or ~$74/month) and its own Artifact Registry, so don't add a second
 cluster speculatively. Add one when you have a real reason: GPU vs
@@ -71,9 +75,28 @@ TPU isolation, regional separation, or dev vs prod environments.
 
 ## Related pages
 
-- [Cost Optimization](../guides/cost_optimization.md) — control plane
-  costs and how the GKE free tier covers exactly one cluster.
-- [Capacity Reservations](reservations.md) — when reservations make
-  multi-cluster setups worth the overhead.
-- [Configuration](../configuration.md) — `KINETIC_CLUSTER` and the
-  precedence rules.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`graph;1em` Cost Optimization
+:link: cost_optimization
+:link-type: doc
+
+Control plane costs and how the GKE free tier covers exactly one
+cluster.
+:::
+
+:::{grid-item-card} {octicon}`checklist;1em` Capacity Reservations
+:link: reservations
+:link-type: doc
+
+When reservations make multi-cluster setups worth the overhead.
+:::
+
+:::{grid-item-card} {octicon}`gear;1em` Configuration
+:link: ../configuration
+:link-type: doc
+
+`KINETIC_CLUSTER` and the precedence rules.
+:::
+::::

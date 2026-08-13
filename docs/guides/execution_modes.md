@@ -203,8 +203,34 @@ source into the image.
 
 ## Related pages
 
-- [What Ships to the Pod](packaging.md) — the full packaging contract.
-- [Dependencies](dependencies.md) — how Kinetic discovers what to install.
-- [Container Images](containers.md) — base-image workflow and
-  `kinetic build-image`.
-- [Getting Started](../getting_started.md) — your first run end-to-end.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`file-directory;1em` What Ships to the Pod
+:link: packaging
+:link-type: doc
+
+The full packaging contract.
+:::
+
+:::{grid-item-card} {octicon}`package;1em` Dependencies
+:link: dependencies
+:link-type: doc
+
+How Kinetic discovers what to install.
+:::
+
+:::{grid-item-card} {octicon}`stack;1em` Container Images
+:link: containers
+:link-type: doc
+
+Base-image workflow and `kinetic build-image`.
+:::
+
+:::{grid-item-card} {octicon}`rocket;1em` Getting Started
+:link: ../getting_started
+:link-type: doc
+
+Your first run end-to-end.
+:::
+::::

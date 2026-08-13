@@ -32,10 +32,11 @@ This installs the `@kinetic.run()` decorator and the `kinetic` CLI,
 which provisions and manages infrastructure (Pulumi and the GCP
 plugins).
 
-> **Note:** The [Pulumi](https://www.pulumi.com/) CLI (used for
-> infrastructure provisioning) is bundled and managed automatically.
-> It will be installed to `~/.kinetic/pulumi` on first use if not
-> already present.
+:::{note}
+The [Pulumi](https://www.pulumi.com/) CLI (used for infrastructure
+provisioning) is bundled and managed automatically. It will be
+installed to `~/.kinetic/pulumi` on first use if not already present.
+:::
 
 ## Set up your environment
 
@@ -64,16 +65,24 @@ active profile is what every `kinetic` command and every
 the command line. Switch contexts with `kinetic profile use <profile-name>`, and
 see what's saved with `kinetic profile ls`.
 
-> **Cleanup reminder:** when you're done, run `kinetic down` to tear
-> down all resources and stop incurring costs. See the
-> [CLI Reference](cli) for the full set of commands.
+:::{admonition} Cleanup reminder
+:class: warning
 
-**Sharing infrastructure with teammates?** Kinetic stores Pulumi
-state in a per-project GCS bucket (`gs://{project}-kinetic-state`),
-so any teammate with `roles/storage.objectAdmin` on the bucket sees
-the same stack. The first `kinetic up` creates the bucket; the first
-admin needs `roles/storage.admin` on the project. See
+When you're done, run `kinetic down` to tear down all resources and
+stop incurring costs. See the [CLI Reference](cli) for the full set
+of commands.
+:::
+
+:::{admonition} Sharing infrastructure with teammates?
+:class: seealso
+
+Kinetic stores Pulumi state in a per-project GCS bucket
+(`gs://{project}-kinetic-state`), so any teammate with
+`roles/storage.objectAdmin` on the bucket sees the same stack. The
+first `kinetic up` creates the bucket; the first admin needs
+`roles/storage.admin` on the project. See
 [Pulumi state](configuration.md#pulumi-state) for the full IAM story.
+:::
 
 ## Run your first job
 
@@ -116,14 +125,38 @@ python fashion_mnist.py
 
 After your first run works, the most useful follow-ups are:
 
-- [Examples](examples.md): a catalog of runnable scripts that
-  cover async jobs, data, checkpoints, parallel sweeps, and LLM
-  fine-tuning. The fastest way to see real patterns end to end.
-- [Execution Modes](guides/execution_modes.md): bundled vs prebuilt
-  vs custom image, and when to switch.
-- [Detached Jobs](guides/async_jobs.md): `run_async()`,
-  reattach, and the job lifecycle for long-running work.
-- [Data](guides/data.md) and
-  [Checkpointing](guides/checkpointing.md): `kinetic.Data(...)` for
-  inputs and `KINETIC_OUTPUT_DIR` for durable outputs and resumable
-  checkpoints.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`code-square;1em` Examples
+:link: examples
+:link-type: doc
+
+A catalog of runnable scripts that cover async jobs, data,
+checkpoints, parallel sweeps, and LLM fine-tuning. The fastest way to
+see real patterns end to end.
+:::
+
+:::{grid-item-card} {octicon}`package;1em` Execution Modes
+:link: guides/execution_modes
+:link-type: doc
+
+Bundled vs prebuilt vs custom image, and when to switch.
+:::
+
+:::{grid-item-card} {octicon}`clock;1em` Detached Jobs
+:link: guides/async_jobs
+:link-type: doc
+
+`run_async()`, reattach, and the job lifecycle for long-running work.
+:::
+
+:::{grid-item-card} {octicon}`database;1em` Data & Checkpointing
+:link: guides/data
+:link-type: doc
+
+`kinetic.Data(...)` for inputs and `KINETIC_OUTPUT_DIR` for durable
+outputs and resumable checkpoints. See also
+[Checkpointing](guides/checkpointing.md).
+:::
+::::

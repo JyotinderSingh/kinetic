@@ -10,6 +10,7 @@ When a function decorated with `@kinetic.run()` is executed (either directly
 for a synchronous run, or via `run_async()` for a detached job), the system
 follows these steps:
 
+:::{container} kinetic-steps
 1.  **Context Resolution**: Kinetic aggregates function parameters, environment variables, and local configurations into a unified `JobContext`.
 2.  **Credential Validation**: The system verifies active `gcloud` and `kubectl` credentials, performing automatic configuration where necessary to ensure access to GCP services.
 3.  **Artifact Preparation**:
@@ -21,3 +22,4 @@ follows these steps:
 5.  **Job Submission**: Based on the requested accelerator type, Kinetic submits a Kubernetes Job (for GKE) or a LeaderWorkerSet (for multi-host Pathways) to the target cluster.
 6.  **Remote Execution**: The remote pod pulls the container image, retrieves the serialized artifacts, mounts the required data volumes, and executes the function.
 7.  **Result Retrieval**: Upon completion, the function's return value is retrieved from GCS, deserialized, and returned to the local Python process.
+:::
