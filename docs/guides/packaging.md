@@ -190,6 +190,7 @@ value that is not a number, and logs a warning about the bad value.
 The pod downloads both artifacts and verifies their SHA-256 hashes. The
 runner then does the following:
 
+:::{container} kinetic-steps
 1. The runner extracts `context.zip` into the workspace directory.
 2. The runner rebuilds `sys.path` from the packaging plan. The workspace
    root goes first. Each client `sys.path` entry that lived under the
@@ -201,6 +202,7 @@ runner then does the following:
    workspace root when your client working directory was outside the
    package root.
 4. The runner unpickles `payload.pkl` and calls your function.
+:::
 
 The runner does not replicate a client `sys.path` entry that points at
 site-packages, or at any directory outside the package root. The image
@@ -395,9 +397,34 @@ holds a skew warning only when the payload unpickled correctly.
 
 ## Related pages
 
-- [Dependencies](dependencies.md) — how Kinetic finds the requirements
-  file.
-- [Data](data.md) — how to move large inputs without the archive.
-- [Execution Modes](execution_modes.md) — how Kinetic produces the image.
-- [Troubleshooting](../troubleshooting.md) — diagnosis of packaging
-  failures, by symptom.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`package;1em` Dependencies
+:link: dependencies
+:link-type: doc
+
+How Kinetic finds the requirements file.
+:::
+
+:::{grid-item-card} {octicon}`database;1em` Data
+:link: data
+:link-type: doc
+
+How to move large inputs without the archive.
+:::
+
+:::{grid-item-card} {octicon}`zap;1em` Execution Modes
+:link: execution_modes
+:link-type: doc
+
+How Kinetic produces the image.
+:::
+
+:::{grid-item-card} {octicon}`bug;1em` Troubleshooting
+:link: ../troubleshooting
+:link-type: doc
+
+Diagnosis of packaging failures, by symptom.
+:::
+::::
