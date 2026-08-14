@@ -54,9 +54,141 @@ _JAX_INSTALL = {
 }
 
 # Core Python packages installed in every kinetic container image.
-_CORE_DEPS = ["keras", "cloudpickle", "google-cloud-storage"]
+# `keras-kinetic` itself must be present so that payloads referencing
+# kinetic APIs (module-level `import kinetic`, Data helpers) unpickle on
+# the pod; it is pinned to the client version to avoid skew.
+_CORE_DEPS = [
+  "keras",
+  "cloudpickle",
+  "google-cloud-storage",
+  f"keras-kinetic=={version.__version__}",
+]
+
+# Requirements directives that cannot work in a build/pod context, which
+# only ever contains the generated requirements file itself.
+_LOCAL_PATH_PREFIXES = ("./", "../", ".\\", "..\\")
+_REMOTE_EDITABLE_PREFIXES = (
+  "git+",
+  "hg+",
+  "bzr+",
+  "svn+",
+  "http://",
+  "https://",
+)
+
+# pyproject.toml tables that declare dependencies kinetic does not read.
+_PYPROJECT_UNREAD_TABLES = (
+  (("tool", "poetry", "dependencies"), "[tool.poetry.dependencies]"),
+  (("dependency-groups",), "[dependency-groups]"),
+  (("project", "optional-dependencies"), "[project.optional-dependencies]"),
+)
 
 _DEFAULT_BASE_IMAGE_REPO = "kinetic"
+
+
+def _join_continuation_lines(requirements_content: str) -> str:
+  """Join backslash-continued physical lines into logical requirement lines.
+
+  `pip-compile --generate-hashes` output and hand-written multi-line
+  entries span several physical lines.  Filtering those line by line
+  leaves dangling `--hash=` fragments that `uv pip install` refuses to
+  parse, so continuations are collapsed before any filtering happens.
+
+  Args:
+      requirements_content: Raw text of a requirements file.
+
+  Returns:
+      The same text with backslash continuations collapsed onto a
+      single line each.  Lines without continuations are preserved
+      verbatim.
+  """
+  if not requirements_content:
+    return requirements_content
+
+  logical_lines: list[str] = []
+  pending = ""
+  for line in requirements_content.splitlines():
+    stripped = line.rstrip()
+    if stripped.endswith("\\"):
+      pending += stripped[:-1].rstrip() + " "
+      continue
+    if pending:
+      logical_lines.append((pending + line.strip()).rstrip())
+      pending = ""
+    else:
+      logical_lines.append(line)
+  if pending:
+    logical_lines.append(pending.rstrip())
+  return "\n".join(logical_lines) + "\n"
+
+
+def _unusable_requirement_reason(line: str) -> str | None:
+  """Return why *line* cannot be installed remotely, or None if it can."""
+  head, _, rest = line.partition(" ")
+  flag = head.split("=", 1)[0]
+  target = rest.strip() or head.partition("=")[2].strip()
+
+  if flag in ("-e", "--editable"):
+    if target.startswith(_REMOTE_EDITABLE_PREFIXES):
+      return None
+    return (
+      "editable installs reference a local project directory that does not "
+      "exist in the image/pod"
+    )
+  if flag in ("-r", "--requirement", "-c", "--constraint"):
+    return (
+      "it includes another requirements file, which is not shipped to the "
+      "image/pod"
+    )
+  if "file://" in line:
+    return "it references a file:// URL that does not exist in the image/pod"
+  if line.startswith(_LOCAL_PATH_PREFIXES) or line in (".", ".."):
+    return "it references a local path that will not exist in the image/pod"
+  if line.startswith("/"):
+    return (
+      "it references an absolute local path that will not exist in the "
+      "image/pod"
+    )
+  # PEP 508 direct references ("pkg @ ./vendor" / "pkg @ /opt/src") start
+  # with the package name, so the line-leading checks above miss them.
+  if " @ " in line:
+    ref = line.partition(" @ ")[2].strip()
+    if ref.startswith(_LOCAL_PATH_PREFIXES):
+      return "it references a local path that will not exist in the image/pod"
+    if ref.startswith("/"):
+      return (
+        "it references an absolute local path that will not exist in the "
+        "image/pod"
+      )
+  return None
+
+
+def _reject_unusable_requirements(
+  requirements_content: str, source: str
+) -> None:
+  """Fail at submit time on requirement lines that cannot install remotely.
+
+  Both the Cloud Build context and the pod's runtime install see only
+  the generated requirements file, so path-relative directives resolve
+  to nothing and `uv pip install` aborts after the job has already been
+  submitted.
+
+  Raises:
+      ValueError: Naming the offending line and why it cannot be used.
+  """
+  for line in requirements_content.splitlines():
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+      continue
+    reason = _unusable_requirement_reason(stripped)
+    if reason is None:
+      continue
+    raise ValueError(
+      f"Unusable requirement in {source}: {stripped!r} — {reason}. "
+      "Your project sources are shipped automatically in context.zip, so "
+      "editable/local installs are not needed; inline the referenced file "
+      "or replace the entry with a published distribution."
+    )
 
 
 def _filter_jax_requirements(requirements_content: str) -> str:
@@ -104,6 +236,33 @@ def _filter_jax_requirements(requirements_content: str) -> str:
   return "".join(filtered_lines)
 
 
+def _warn_unextracted_dependencies(pyproject_path: str, data: dict) -> None:
+  """Warn when dependencies are declared where kinetic does not read them."""
+  found = []
+  for keys, label in _PYPROJECT_UNREAD_TABLES:
+    node = data
+    for key in keys:
+      node = node.get(key) if isinstance(node, dict) else None
+      if node is None:
+        break
+    if node:
+      found.append(label)
+  if "dependencies" in (data.get("project", {}).get("dynamic") or []):
+    found.append('dynamic = ["dependencies"]')
+
+  if not found:
+    return
+  logging.warning(
+    "%s declares no [project].dependencies so no dependencies were "
+    "extracted, but it does declare %s. kinetic only reads "
+    "[project].dependencies — export those dependencies into a "
+    "requirements.txt next to your code, or the job will run with "
+    "base-image packages only.",
+    pyproject_path,
+    ", ".join(found),
+  )
+
+
 def _parse_pyproject_dependencies(pyproject_path: str) -> str:
   """Extract `[project.dependencies]` from a pyproject.toml file.
 
@@ -124,6 +283,7 @@ def _parse_pyproject_dependencies(pyproject_path: str) -> str:
 
   deps = data.get("project", {}).get("dependencies", [])
   if not deps:
+    _warn_unextracted_dependencies(pyproject_path, data)
     return ""
   return "\n".join(deps) + "\n"
 
@@ -220,7 +380,12 @@ def _hash_requirements(
   Returns:
       SHA256 hex digest
   """
-  content = f"base_image={base_image}\ncategory={category}\n"
+  # The kinetic version is part of the generated install command
+  # (keras-kinetic==X), so it must invalidate the cached image tag.
+  content = (
+    f"base_image={base_image}\ncategory={category}\n"
+    f"kinetic={version.__version__}\n"
+  )
 
   if filtered_requirements:
     content += filtered_requirements
@@ -463,6 +628,11 @@ def prepare_requirements_content(
   to prevent conflicts with accelerator-specific installations in the
   prebuilt base image.
 
+  Backslash continuations are joined into logical lines *before*
+  filtering so multi-line entries (e.g. `pip-compile --generate-hashes`
+  output) are dropped or kept as a whole.  Lines that reference files
+  absent from the pod are rejected outright.
+
   Args:
       requirements_path: Path to `requirements.txt` or `pyproject.toml`,
           or None.
@@ -470,6 +640,10 @@ def prepare_requirements_content(
   Returns:
       Filtered requirements content suitable for `uv pip install -r`,
       or None if no dependencies were found.
+
+  Raises:
+      ValueError: If a requirement line cannot be installed remotely
+          (editable/local paths, nested `-r`/`-c` includes, `file://`).
   """
   if not requirements_path or not os.path.exists(requirements_path):
     return None
@@ -483,7 +657,9 @@ def prepare_requirements_content(
   if not raw:
     return None
 
-  filtered = _filter_jax_requirements(raw)
+  joined = _join_continuation_lines(raw)
+  _reject_unusable_requirements(joined, requirements_path)
+  filtered = _filter_jax_requirements(joined)
   return filtered if filtered.strip() else None
 
 

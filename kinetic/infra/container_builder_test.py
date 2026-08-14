@@ -243,6 +243,27 @@ class TestGenerateDockerfile(parameterized.TestCase):
     ]:
       self.assertIn(expected, install_line)
 
+  def test_installs_pinned_kinetic(self):
+    """The bundled image must carry the client's own kinetic version."""
+    from kinetic.version import __version__
+
+    content = _generate_dockerfile(
+      base_image="python:3.12-slim",
+      has_requirements=False,
+      category="cpu",
+    )
+    install_line = [
+      line for line in content.splitlines() if "uv pip install" in line
+    ][0]
+    self.assertIn(f"keras-kinetic=={__version__}", install_line)
+
+  def test_kinetic_version_participates_in_image_hash(self):
+    with mock.patch("kinetic.infra.container_builder.version") as mock_version:
+      mock_version.__version__ = "9.9.9"
+      changed = _hash_requirements(None, "cpu", "python:3.12-slim")
+    unchanged = _hash_requirements(None, "cpu", "python:3.12-slim")
+    self.assertNotEqual(changed, unchanged)
+
   def test_uses_base_image(self):
     content = _generate_dockerfile(
       base_image="python:3.11-bullseye",
@@ -421,7 +442,7 @@ class TestGetPrebuiltImage(parameterized.TestCase):
     self.assertEqual(uri, f"env-repo/base-gpu:{__version__}")
 
 
-class TestPrepareRequirementsContent(absltest.TestCase):
+class TestPrepareRequirementsContent(parameterized.TestCase):
   def _write_file(self, name, content):
     td = tempfile.TemporaryDirectory()
     self.addCleanup(td.cleanup)
@@ -470,6 +491,173 @@ class TestPrepareRequirementsContent(absltest.TestCase):
 
     path = self._write_file("requirements.txt", "jax\njaxlib\n")
     self.assertIsNone(prepare_requirements_content(path))
+
+  def test_joins_continuations_before_filtering(self):
+    """pip-compile --generate-hashes entries survive the JAX filter intact."""
+    from kinetic.infra.container_builder import prepare_requirements_content
+
+    path = self._write_file(
+      "requirements.txt",
+      "jax==0.4.30 \\\n"
+      "    --hash=sha256:1111 \\\n"
+      "    --hash=sha256:2222\n"
+      "numpy==2.1.0 \\\n"
+      "    --hash=sha256:3333\n",
+    )
+    result = prepare_requirements_content(path)
+
+    self.assertNotIn("jax", result)
+    self.assertIn("numpy==2.1.0 --hash=sha256:3333", result)
+    # No dangling continuation fragments are left behind.
+    for line in result.splitlines():
+      self.assertFalse(line.lstrip().startswith("--hash="), line)
+      self.assertFalse(line.rstrip().endswith("\\"), line)
+
+  @parameterized.named_parameters(
+    dict(testcase_name="editable_self", line="-e .\n"),
+    dict(testcase_name="editable_sibling", line="-e ../mylib\n"),
+    dict(testcase_name="editable_long_flag", line="--editable ./pkg\n"),
+    dict(testcase_name="local_dir", line="./vendor/pkg\n"),
+    dict(testcase_name="parent_dir", line="../vendor/pkg\n"),
+    dict(testcase_name="absolute_path", line="/opt/src/mylib\n"),
+    dict(testcase_name="nested_include", line="-r base.txt\n"),
+    dict(testcase_name="nested_include_eq", line="--requirement=base.txt\n"),
+    dict(testcase_name="constraints", line="-c constraints.txt\n"),
+    dict(
+      testcase_name="file_url",
+      line="mypkg @ file:///abs/path/mypkg\n",
+    ),
+    dict(
+      testcase_name="direct_ref_local",
+      line="mypkg @ ./vendor/pkg\n",
+    ),
+    dict(
+      testcase_name="direct_ref_absolute",
+      line="mypkg @ /opt/src/mylib\n",
+    ),
+  )
+  def test_rejects_unusable_requirement_lines(self, line):
+    from kinetic.infra.container_builder import prepare_requirements_content
+
+    path = self._write_file("requirements.txt", f"numpy\n{line}")
+    with self.assertRaises(ValueError) as raised:
+      prepare_requirements_content(path)
+
+    message = str(raised.exception)
+    self.assertIn(line.strip(), message)
+    self.assertIn(path, message)
+
+  @parameterized.named_parameters(
+    dict(
+      testcase_name="index_url", line="--index-url https://pypi.org/simple\n"
+    ),
+    dict(testcase_name="extra_index", line="--extra-index-url https://x/\n"),
+    dict(testcase_name="find_links", line="-f https://example.com/wheels\n"),
+    dict(testcase_name="vcs_editable", line="-e git+https://example.com/x\n"),
+    dict(testcase_name="comment_with_dot_slash", line="# see ./vendor\n"),
+    dict(
+      testcase_name="url_requirement", line="pkg @ https://example.com/a.whl\n"
+    ),
+  )
+  def test_accepts_remote_and_flag_lines(self, line):
+    from kinetic.infra.container_builder import prepare_requirements_content
+
+    path = self._write_file("requirements.txt", f"numpy\n{line}")
+    result = prepare_requirements_content(path)
+    self.assertIn("numpy", result)
+
+  def test_warns_for_poetry_only_pyproject(self):
+    from kinetic.infra.container_builder import prepare_requirements_content
+
+    path = self._write_file(
+      "pyproject.toml",
+      "[tool.poetry]\nname = 'x'\n\n"
+      "[tool.poetry.dependencies]\nnumpy = '^2.0'\n",
+    )
+    with mock.patch(
+      "kinetic.infra.container_builder.logging.warning"
+    ) as mock_warn:
+      self.assertIsNone(prepare_requirements_content(path))
+
+    mock_warn.assert_called_once()
+    self.assertIn("[tool.poetry.dependencies]", mock_warn.call_args[0][2])
+
+  def test_warns_for_dynamic_dependencies_pyproject(self):
+    from kinetic.infra.container_builder import prepare_requirements_content
+
+    path = self._write_file(
+      "pyproject.toml",
+      "[project]\nname = 'x'\ndynamic = ['dependencies']\n",
+    )
+    with mock.patch(
+      "kinetic.infra.container_builder.logging.warning"
+    ) as mock_warn:
+      self.assertIsNone(prepare_requirements_content(path))
+
+    mock_warn.assert_called_once()
+    self.assertIn('dynamic = ["dependencies"]', mock_warn.call_args[0][2])
+
+  def test_warns_for_pep735_dependency_groups(self):
+    from kinetic.infra.container_builder import prepare_requirements_content
+
+    path = self._write_file(
+      "pyproject.toml",
+      "[project]\nname = 'x'\n\n[dependency-groups]\ndev = ['pytest']\n",
+    )
+    with mock.patch(
+      "kinetic.infra.container_builder.logging.warning"
+    ) as mock_warn:
+      prepare_requirements_content(path)
+
+    mock_warn.assert_called_once()
+    self.assertIn("[dependency-groups]", mock_warn.call_args[0][2])
+
+  def test_no_warning_when_dependencies_present(self):
+    from kinetic.infra.container_builder import prepare_requirements_content
+
+    path = self._write_file(
+      "pyproject.toml",
+      "[project]\ndependencies = ['numpy']\n\n"
+      "[project.optional-dependencies]\ndev = ['pytest']\n",
+    )
+    with mock.patch(
+      "kinetic.infra.container_builder.logging.warning"
+    ) as mock_warn:
+      result = prepare_requirements_content(path)
+
+    self.assertIn("numpy", result)
+    mock_warn.assert_not_called()
+
+  def test_no_warning_for_plain_build_only_pyproject(self):
+    from kinetic.infra.container_builder import prepare_requirements_content
+
+    path = self._write_file(
+      "pyproject.toml", "[build-system]\nrequires = ['setuptools']\n"
+    )
+    with mock.patch(
+      "kinetic.infra.container_builder.logging.warning"
+    ) as mock_warn:
+      self.assertIsNone(prepare_requirements_content(path))
+
+    mock_warn.assert_not_called()
+
+
+class TestJoinContinuationLines(absltest.TestCase):
+  def test_no_continuations_is_identity(self):
+    from kinetic.infra.container_builder import _join_continuation_lines
+
+    content = "# comment\nnumpy==1.26\n\nscipy\n"
+    self.assertEqual(_join_continuation_lines(content), content)
+
+  def test_empty_string(self):
+    from kinetic.infra.container_builder import _join_continuation_lines
+
+    self.assertEqual(_join_continuation_lines(""), "")
+
+  def test_trailing_continuation_without_body(self):
+    from kinetic.infra.container_builder import _join_continuation_lines
+
+    self.assertEqual(_join_continuation_lines("numpy \\\n"), "numpy\n")
 
 
 if __name__ == "__main__":

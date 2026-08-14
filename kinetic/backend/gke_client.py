@@ -1,11 +1,12 @@
 """GKE job submission for kinetic."""
 
 import functools
+import threading
 import time
 from contextlib import suppress
 
 from absl import logging
-from kubernetes import client
+from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
 from kinetic.backend import k8s_utils
@@ -14,6 +15,11 @@ from kinetic.cli.constants import KINETIC_KSA_NAME
 from kinetic.credentials import invalidate_credential_cache
 from kinetic.debug import DEBUG_WAIT_TIMEOUT, DEBUGPY_PORT
 from kinetic.job_status import JobStatus
+
+# Guards the last-seen kubeconfig context used to invalidate the
+# non-context-keyed client caches in k8s_utils.
+_CONTEXT_LOCK = threading.Lock()
+_active_kube_context: str | None = None
 
 
 def submit_k8s_job(
@@ -119,7 +125,7 @@ def wait_for_job(job, namespace="default", timeout=3600, poll_interval=10):
       RuntimeError: If job fails or times out
   """
   batch_v1 = _batch_v1()
-  core_v1 = k8s_utils.core_v1()
+  core_v1 = _core_v1()
 
   job_name = job.metadata.name
   start_time = time.time()
@@ -231,7 +237,7 @@ def job_exists(job_name, namespace="default") -> bool:
 def get_job_status(job_name, namespace="default") -> JobStatus:
   """Return the current job status for async observation APIs."""
   batch_v1 = _batch_v1()
-  core_v1 = k8s_utils.core_v1()
+  core_v1 = _core_v1()
 
   try:
     job_status = batch_v1.read_namespaced_job_status(job_name, namespace)
@@ -254,7 +260,7 @@ def get_job_status(job_name, namespace="default") -> JobStatus:
 
 def get_job_pod_name(job_name, namespace="default") -> str | None:
   """Return the most relevant pod name for a GKE Job, if any exists."""
-  core_v1 = k8s_utils.core_v1()
+  core_v1 = _core_v1()
   pod = _select_job_pod(core_v1, job_name, namespace)
   if pod is None:
     return None
@@ -265,7 +271,7 @@ def get_job_logs(
   job_name, namespace="default", tail_lines: int | None = None
 ) -> str:
   """Return logs for the active pod of a GKE Job."""
-  core_v1 = k8s_utils.core_v1()
+  core_v1 = _core_v1()
   pod = _select_job_pod(core_v1, job_name, namespace)
   if pod is None:
     raise RuntimeError(f"No pod found for GKE job {job_name}")
@@ -303,11 +309,75 @@ def list_jobs(namespace="default") -> list[dict[str, str]]:
   return results
 
 
-@functools.lru_cache(maxsize=1)
+def _kube_context_name() -> str | None:
+  """Return the active kubeconfig context name, if one can be determined.
+
+  Returns None when no kubeconfig is readable (in-cluster execution,
+  CI without a kubeconfig), which selects the legacy single-client
+  behavior.
+  """
+  try:
+    _, active_context = config.list_kube_config_contexts()
+  except Exception:
+    return None
+  return (active_context or {}).get("name") or None
+
+
+@functools.lru_cache(maxsize=8)
+def _batch_v1_for_context(context_name: str | None):
+  """Build a BatchV1Api bound to a specific kubeconfig context."""
+  if context_name is None:
+    k8s_utils.load_kube_config()
+    return client.BatchV1Api()
+  return client.BatchV1Api(
+    api_client=config.new_client_from_config(context=context_name)
+  )
+
+
+def _sync_kube_context() -> str | None:
+  """Return the active context, discarding clients built for another one.
+
+  `ensure_credentials` rewrites the kubeconfig whenever a call targets a
+  different (project, zone, cluster), so the active context name is the
+  cluster identity. The caches in `k8s_utils` are not context-keyed, so
+  they are cleared whenever the context changes — otherwise a process
+  that talks to two clusters keeps querying the first one.
+  """
+  global _active_kube_context
+  context_name = _kube_context_name()
+  with _CONTEXT_LOCK:
+    if context_name != _active_kube_context:
+      if _active_kube_context is not None:
+        logging.info(
+          "Kubernetes context changed from %s to %s; rebuilding API clients",
+          _active_kube_context,
+          context_name,
+        )
+      _active_kube_context = context_name
+      k8s_utils.load_kube_config.cache_clear()
+      k8s_utils.core_v1.cache_clear()
+  return context_name
+
+
 def _batch_v1():
-  """Return a cached BatchV1Api client, loading kubeconfig on first call."""
-  k8s_utils.load_kube_config()
-  return client.BatchV1Api()
+  """Return a BatchV1Api for the cluster the kubeconfig currently selects."""
+  return _batch_v1_for_context(_sync_kube_context())
+
+
+@functools.lru_cache(maxsize=8)
+def _core_v1_for_context(context_name: str | None):
+  """Build a CoreV1Api bound to a specific kubeconfig context."""
+  if context_name is None:
+    k8s_utils.load_kube_config()
+    return client.CoreV1Api()
+  return client.CoreV1Api(
+    api_client=config.new_client_from_config(context=context_name)
+  )
+
+
+def _core_v1():
+  """Return a CoreV1Api for the cluster the kubeconfig currently selects."""
+  return _core_v1_for_context(_sync_kube_context())
 
 
 def _create_job_spec(

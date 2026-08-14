@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 from absl.testing import absltest
 from kubernetes.client.rest import ApiException
 
+from kinetic.backend import gke_client
 from kinetic.backend.gke_client import (
   _create_job_spec,
   get_job_logs,
@@ -281,7 +282,7 @@ class TestWaitForJob(absltest.TestCase):
         return_value=mock_batch,
       ),
       mock.patch(
-        "kinetic.backend.k8s_utils.core_v1",
+        "kinetic.backend.gke_client._core_v1",
         return_value=mock_core,
       ),
     ):
@@ -305,7 +306,7 @@ class TestWaitForJob(absltest.TestCase):
         return_value=mock_batch,
       ),
       mock.patch(
-        "kinetic.backend.k8s_utils.core_v1",
+        "kinetic.backend.gke_client._core_v1",
         return_value=mock_core,
       ),
       self.assertRaisesRegex(RuntimeError, "failed"),
@@ -342,7 +343,7 @@ class TestWaitForJob(absltest.TestCase):
         return_value=mock_batch,
       ),
       mock.patch(
-        "kinetic.backend.k8s_utils.core_v1",
+        "kinetic.backend.gke_client._core_v1",
         return_value=mock_core,
       ),
     ):
@@ -367,7 +368,7 @@ class TestWaitForJob(absltest.TestCase):
         "kinetic.backend.gke_client._batch_v1",
         return_value=mock_batch,
       ),
-      mock.patch("kinetic.backend.k8s_utils.core_v1"),
+      mock.patch("kinetic.backend.gke_client._core_v1"),
       mock.patch("kinetic.backend.gke_client.time.sleep"),
       self.assertRaisesRegex(RuntimeError, "timed out"),
     ):
@@ -392,7 +393,7 @@ class TestWaitForJob(absltest.TestCase):
         return_value=mock_batch,
       ),
       mock.patch(
-        "kinetic.backend.k8s_utils.core_v1",
+        "kinetic.backend.gke_client._core_v1",
         return_value=mock_core,
       ),
       mock.patch("kinetic.backend.gke_client.time.sleep") as mock_sleep,
@@ -424,7 +425,7 @@ class TestWaitForJob(absltest.TestCase):
         return_value=mock_batch,
       ),
       mock.patch(
-        "kinetic.backend.k8s_utils.core_v1",
+        "kinetic.backend.gke_client._core_v1",
         return_value=mock_core,
       ),
       mock.patch("kinetic.backend.gke_client.time.sleep"),
@@ -457,7 +458,7 @@ class TestWaitForJob(absltest.TestCase):
         return_value=mock_batch,
       ),
       mock.patch(
-        "kinetic.backend.k8s_utils.core_v1",
+        "kinetic.backend.gke_client._core_v1",
         return_value=mock_core,
       ),
       mock.patch("kinetic.backend.gke_client.time.sleep"),
@@ -475,7 +476,7 @@ class TestAsyncObservationHelpers(absltest.TestCase):
       mock.patch("kinetic.backend.gke_client._batch_v1")
     ).return_value
     self.mock_core = self.enterContext(
-      mock.patch("kinetic.backend.k8s_utils.core_v1")
+      mock.patch("kinetic.backend.gke_client._core_v1")
     ).return_value
 
   def _make_job_status(self, *, succeeded=None, failed=None):
@@ -614,6 +615,172 @@ class TestAsyncObservationHelpers(absltest.TestCase):
       namespace="team-ns",
       label_selector="app=kinetic",
     )
+
+
+class TestBatchV1ClusterScoping(absltest.TestCase):
+  """A process submitting to two clusters must not reuse the first client."""
+
+  def setUp(self):
+    super().setUp()
+    self._reset_cache()
+    self.addCleanup(self._reset_cache)
+
+  def _reset_cache(self):
+    gke_client._batch_v1_for_context.cache_clear()
+    gke_client._core_v1_for_context.cache_clear()
+    gke_client._active_kube_context = None
+
+  def _patch_context(self, contexts):
+    """Patch context discovery to yield *contexts* in order."""
+    return mock.patch.object(
+      gke_client,
+      "_kube_context_name",
+      side_effect=list(contexts),
+    )
+
+  def test_distinct_contexts_get_distinct_clients(self):
+    with (
+      self._patch_context(["gke_p_z_cluster-a", "gke_p_z_cluster-b"]),
+      mock.patch(
+        "kinetic.backend.gke_client.config.new_client_from_config",
+        side_effect=lambda context: MagicMock(name=context),
+      ) as mock_new_client,
+      mock.patch(
+        "kinetic.backend.gke_client.client.BatchV1Api",
+        side_effect=lambda api_client: MagicMock(api_client=api_client),
+      ),
+      mock.patch("kinetic.backend.k8s_utils.load_kube_config"),
+      mock.patch("kinetic.backend.k8s_utils.core_v1"),
+    ):
+      first = gke_client._batch_v1()
+      second = gke_client._batch_v1()
+
+    self.assertIsNot(first, second)
+    self.assertEqual(
+      [call.kwargs["context"] for call in mock_new_client.call_args_list],
+      ["gke_p_z_cluster-a", "gke_p_z_cluster-b"],
+    )
+
+  def test_same_context_reuses_client(self):
+    with (
+      self._patch_context(["gke_p_z_cluster-a", "gke_p_z_cluster-a"]),
+      mock.patch(
+        "kinetic.backend.gke_client.config.new_client_from_config",
+        side_effect=lambda context: MagicMock(name=context),
+      ) as mock_new_client,
+      mock.patch(
+        "kinetic.backend.gke_client.client.BatchV1Api",
+        side_effect=lambda api_client: MagicMock(api_client=api_client),
+      ),
+      mock.patch("kinetic.backend.k8s_utils.load_kube_config"),
+      mock.patch("kinetic.backend.k8s_utils.core_v1"),
+    ):
+      first = gke_client._batch_v1()
+      second = gke_client._batch_v1()
+
+    self.assertIs(first, second)
+    mock_new_client.assert_called_once()
+
+  def test_context_change_invalidates_k8s_utils_caches(self):
+    with (
+      self._patch_context(["gke_p_z_cluster-a", "gke_p_z_cluster-b"]),
+      mock.patch(
+        "kinetic.backend.gke_client.config.new_client_from_config",
+        side_effect=lambda context: MagicMock(name=context),
+      ),
+      mock.patch(
+        "kinetic.backend.gke_client.client.BatchV1Api",
+        side_effect=lambda api_client: MagicMock(api_client=api_client),
+      ),
+      mock.patch("kinetic.backend.k8s_utils.load_kube_config") as mock_load,
+      mock.patch("kinetic.backend.k8s_utils.core_v1") as mock_core,
+    ):
+      gke_client._batch_v1()
+      load_clears = mock_load.cache_clear.call_count
+      core_clears = mock_core.cache_clear.call_count
+      gke_client._batch_v1()
+
+      self.assertEqual(mock_load.cache_clear.call_count, load_clears + 1)
+      self.assertEqual(mock_core.cache_clear.call_count, core_clears + 1)
+
+  def test_falls_back_to_legacy_client_without_kubeconfig(self):
+    with (
+      self._patch_context([None, None]),
+      mock.patch(
+        "kinetic.backend.gke_client.config.new_client_from_config"
+      ) as mock_new_client,
+      mock.patch(
+        "kinetic.backend.gke_client.client.BatchV1Api",
+        return_value=MagicMock(),
+      ) as mock_api,
+      mock.patch("kinetic.backend.k8s_utils.load_kube_config") as mock_load,
+      mock.patch("kinetic.backend.k8s_utils.core_v1"),
+    ):
+      first = gke_client._batch_v1()
+      second = gke_client._batch_v1()
+
+    self.assertIs(first, second)
+    mock_new_client.assert_not_called()
+    mock_load.assert_called_once_with()
+    mock_api.assert_called_once_with()
+
+  def test_context_name_is_none_when_kubeconfig_unreadable(self):
+    with mock.patch(
+      "kinetic.backend.gke_client.config.list_kube_config_contexts",
+      side_effect=RuntimeError("no kubeconfig"),
+    ):
+      self.assertIsNone(gke_client._kube_context_name())
+
+  def test_context_name_read_from_active_context(self):
+    with mock.patch(
+      "kinetic.backend.gke_client.config.list_kube_config_contexts",
+      return_value=([], {"name": "gke_p_z_cluster-b"}),
+    ):
+      self.assertEqual(gke_client._kube_context_name(), "gke_p_z_cluster-b")
+
+  def test_core_v1_rebuilds_on_context_change(self):
+    """Log/pod lookups must follow the kubeconfig, not the first cluster."""
+    with (
+      self._patch_context(["gke_p_z_cluster-a", "gke_p_z_cluster-b"]),
+      mock.patch(
+        "kinetic.backend.gke_client.config.new_client_from_config",
+        side_effect=lambda context: MagicMock(name=context),
+      ) as mock_new_client,
+      mock.patch(
+        "kinetic.backend.gke_client.client.CoreV1Api",
+        side_effect=lambda api_client: MagicMock(api_client=api_client),
+      ),
+      mock.patch("kinetic.backend.k8s_utils.load_kube_config"),
+      mock.patch("kinetic.backend.k8s_utils.core_v1"),
+    ):
+      first = gke_client._core_v1()
+      second = gke_client._core_v1()
+
+    self.assertIsNot(first, second)
+    self.assertEqual(
+      [call.kwargs["context"] for call in mock_new_client.call_args_list],
+      ["gke_p_z_cluster-a", "gke_p_z_cluster-b"],
+    )
+
+  def test_core_v1_reuses_client_within_one_context(self):
+    with (
+      self._patch_context(["gke_p_z_cluster-a", "gke_p_z_cluster-a"]),
+      mock.patch(
+        "kinetic.backend.gke_client.config.new_client_from_config",
+        side_effect=lambda context: MagicMock(name=context),
+      ) as mock_new_client,
+      mock.patch(
+        "kinetic.backend.gke_client.client.CoreV1Api",
+        side_effect=lambda api_client: MagicMock(api_client=api_client),
+      ),
+      mock.patch("kinetic.backend.k8s_utils.load_kube_config"),
+      mock.patch("kinetic.backend.k8s_utils.core_v1"),
+    ):
+      first = gke_client._core_v1()
+      second = gke_client._core_v1()
+
+    self.assertIs(first, second)
+    mock_new_client.assert_called_once()
 
 
 if __name__ == "__main__":
