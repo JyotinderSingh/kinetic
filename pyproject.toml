@@ -70,6 +70,7 @@ docs = [
     "sphinx_autobuild",
     "sphinx_book_theme",
     "sphinx-click",
+    "sphinx-copybutton",
     "sphinx-design",
     "sphinx-llm",
 ]

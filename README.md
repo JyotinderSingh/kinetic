@@ -34,6 +34,12 @@ final_loss = train_model()
 - **Data and checkpoint support.** Wrap inputs in `kinetic.Data(...)`
   to ship local files (or stream from GCS) into the job. Write durable
   outputs and resumable checkpoints under `KINETIC_OUTPUT_DIR`.
+- **Your project travels with the job.** Kinetic finds your package
+  root and ships the source with the pickled function. Kinetic then
+  rebuilds `sys.path` and the working directory on the pod. Multi-module
+  projects and relative-path reads thus operate as they do on your
+  machine.
+  See [What Ships to the Pod](https://kinetic.readthedocs.io/en/latest/guides/packaging.html).
 
 ## Documentation
 Comprehensive documentation is available at: https://kinetic.readthedocs.io
@@ -83,7 +89,7 @@ guide.
 | Question                                         | Where to look                                                                                                                                             |
 | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | How do I get my first job running?               | [Getting Started](https://kinetic.readthedocs.io/en/latest/getting_started.html)                                                                          |
-| When should I use `run_async()` instead of `run()`? | [Detached Jobs](https://kinetic.readthedocs.io/en/latest/advanced/async_jobs.html)                                                                        |
+| When should I use `run_async()` instead of `run()`? | [Detached Jobs](https://kinetic.readthedocs.io/en/latest/guides/async_jobs.html)                                                                        |
 | How do I ship data and persist outputs?          | [Data](https://kinetic.readthedocs.io/en/latest/guides/data.html) and [Checkpointing](https://kinetic.readthedocs.io/en/latest/guides/checkpointing.html) |
 | Bundled vs prebuilt vs custom image — which one? | [Execution Modes](https://kinetic.readthedocs.io/en/latest/guides/execution_modes.html)                                                                   |
 | Something's broken; where do I start?            | [Troubleshooting](https://kinetic.readthedocs.io/en/latest/troubleshooting.html)                                                                          |

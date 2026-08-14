@@ -137,9 +137,28 @@ If you need to relocate the file (for example, in CI) set
 
 ## Related pages
 
-- [Configuration](../configuration.md) — the full precedence table and
-  the list of `KINETIC_*` env vars.
-- [Multiple Clusters](clusters.md) — how Kinetic treats
-  clusters as first-class targets; profiles are the ergonomic layer on
-  top.
-- [CLI Reference](../cli.rst) — generated reference for every flag.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`gear;1em` Configuration
+:link: ../configuration
+:link-type: doc
+
+The full precedence table and the list of `KINETIC_*` env vars.
+:::
+
+:::{grid-item-card} {octicon}`server;1em` Multiple Clusters
+:link: clusters
+:link-type: doc
+
+How Kinetic treats clusters as first-class targets; profiles are the
+ergonomic layer on top.
+:::
+
+:::{grid-item-card} {octicon}`terminal;1em` CLI Reference
+:link: ../cli
+:link-type: doc
+
+Generated reference for every flag.
+:::
+::::

@@ -93,11 +93,16 @@ kinetic build-image --repo us-docker.pkg.dev/my-project/kinetic-base
 
 Then set the repository so Kinetic uses your images:
 
+::::{tab-set}
+
+:::{tab-item} Environment variable
+
 ```bash
 export KINETIC_BASE_IMAGE_REPO=us-docker.pkg.dev/my-project/kinetic-base
 ```
+:::
 
-Or pass it directly to the decorator:
+:::{tab-item} Decorator argument
 
 ```python
 @kinetic.run(
@@ -105,6 +110,9 @@ Or pass it directly to the decorator:
 )
 def train(): ...
 ```
+:::
+
+::::
 
 See [`kinetic build-image`](#kinetic-build-image) for the full command reference.
 
@@ -178,9 +186,27 @@ kinetic build-image --repo myuser/kinetic --tag v2.0.0
 
 ## Related pages
 
-- [Execution Modes](../guides/execution_modes.md) — start here for
-  the high-level mode-selection guidance.
-- [Dependencies](../guides/dependencies.md) — what gets discovered
-  and what gets installed in each mode.
-- [Configuration](../configuration.md) — `KINETIC_BASE_IMAGE_REPO`
-  and other relevant env vars.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`zap;1em` Execution Modes
+:link: execution_modes
+:link-type: doc
+
+Start here for the high-level mode-selection guidance.
+:::
+
+:::{grid-item-card} {octicon}`package;1em` Dependencies
+:link: dependencies
+:link-type: doc
+
+What gets discovered and what gets installed in each mode.
+:::
+
+:::{grid-item-card} {octicon}`gear;1em` Configuration
+:link: ../configuration
+:link-type: doc
+
+`KINETIC_BASE_IMAGE_REPO` and other relevant env vars.
+:::
+::::

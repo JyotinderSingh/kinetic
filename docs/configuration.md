@@ -5,9 +5,11 @@ optionally [named profiles](guides/profiles.md) for configuration. This
 page is the source of truth for what each one does, what the defaults
 are, and how they come together when they disagree.
 
+:::{tip}
 If you work with more than one cluster or project, consider saving
 those combinations as [profiles](guides/profiles.md) — they remove the
 need to re-export `KINETIC_*` env vars each time you switch.
+:::
 
 ## Environment variables
 
@@ -22,6 +24,10 @@ need to re-export `KINETIC_*` env vars each time you switch.
 | `KINETIC_RESERVATION`        | `kinetic pool add`        | _(unset)_                        | GCP capacity reservation to consume. Pool-level config, not a per-job setting.                                                                               |
 | `KINETIC_LOG_LEVEL`          | Library                   | `INFO`                           | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `FATAL`.                                                                                                                |
 | `KINETIC_DEBUG_WAIT_TIMEOUT` | Library + remote pod      | `600`                            | Seconds the remote pod waits for a debugger client to attach when `debug=True`. Applies on both sides (local `debug_attach()` and the pod's debugpy server). |
+| `KINETIC_PACKAGE_ROOT`       | Library (submit)          | _(auto-detected)_                | Set this variable to the directory that Kinetic puts into `context.zip`. The directory must exist. The directory must also contain the directory that defines your function. If one of these conditions is not true, Kinetic raises a `ValueError` at submit time. See [What Ships to the Pod](guides/packaging.md). |
+| `KINETIC_NO_DEFAULT_EXCLUDES`| Library (submit)          | _(unset)_                        | Set this variable to `1` to turn the default exclusions off. Kinetic then puts `.venv`, `node_modules`, and the cache directories into `context.zip`. Kinetic always excludes `.git` and `__pycache__`.                                                             |
+| `KINETIC_CONTEXT_SIZE_WARN_MB`| Library (submit)         | `100`                            | Warning threshold in megabytes for `context.zip`. Above the threshold, Kinetic logs a warning and lists the five largest files. Set the value to `0` to turn the warning off.                                                                                    |
+| `KINETIC_PAYLOAD_SIZE_WARN_MB`| Library (submit)         | `50`                             | Warning threshold in megabytes for `payload.pkl`. Above the threshold, Kinetic logs a warning about the arguments and the module-level globals that it captured by value. Set the value to `0` to turn the warning off.                                                                    |
 
 Set them in your shell profile (`~/.bashrc`, `~/.zshrc`) so they
 persist across sessions:
@@ -109,11 +115,35 @@ KINETIC_`.
 
 ## Related pages
 
-- [Getting Started](getting_started.md) — sets the canonical
-  `KINETIC_PROJECT` once.
-- [Profiles](guides/profiles.md) — named bundles for
-  project/zone/cluster/namespace; the ergonomic alternative to
-  re-exporting env vars when you target multiple clusters.
-- [CLI Reference](cli.rst) — generated reference for every flag.
-- [Troubleshooting](troubleshooting.md) — what to check when a setting
-  doesn't take effect.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`rocket;1em` Getting Started
+:link: getting_started
+:link-type: doc
+
+Sets the canonical `KINETIC_PROJECT` once.
+:::
+
+:::{grid-item-card} {octicon}`stack;1em` Profiles
+:link: guides/profiles
+:link-type: doc
+
+Named bundles for project/zone/cluster/namespace; the ergonomic
+alternative to re-exporting env vars when you target multiple clusters.
+:::
+
+:::{grid-item-card} {octicon}`terminal;1em` CLI Reference
+:link: cli
+:link-type: doc
+
+Generated reference for every flag.
+:::
+
+:::{grid-item-card} {octicon}`bug;1em` Troubleshooting
+:link: troubleshooting
+:link-type: doc
+
+What to check when a setting doesn't take effect.
+:::
+::::

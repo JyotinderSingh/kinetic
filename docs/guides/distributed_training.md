@@ -1,9 +1,13 @@
 # Distributed Training
 
-**Who this is for:** users whose model or batch size has outgrown a
-single TPU host. Kinetic + the [Pathways](https://cloud.google.com/tpu/docs/pathways-overview)
+:::{admonition} Who this is for
+:class: note
+
+Users whose model or batch size has outgrown a
+single TPU host. Kinetic + the [Pathways](https://cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/pathways-intro)
 backend lets you treat a multi-host TPU slice as one logical machine,
 without writing your own multi-process JAX coordination.
+:::
 
 For single-host slices (everything that fits on one TPU node like
 `tpu-v5litepod-8`), you don't need this page — your existing JAX or
@@ -122,11 +126,15 @@ ones, with what to actually do:
   Cloud Console quota for your accelerator type; consider switching
   zones.
 
-**Recommended checkpoint frequency:** for any multi-host run, write a
+:::{admonition} Recommended checkpoint frequency
+:class: tip
+
+For any multi-host run, write a
 checkpoint at least every 10 minutes of wall time. The base rate of
 preemption, quota issues, and slice-wide failures is high enough that
 unbounded loss windows are not worth the throughput. See
 [Checkpointing](checkpointing.md) for the API.
+:::
 
 ## Debugging distributed jobs
 
@@ -154,8 +162,27 @@ inspect non-leader logs to diagnose a crash.
 
 ## Related pages
 
-- [Accelerators](../accelerators.md) — slice topologies and naming.
-- [Checkpointing](checkpointing.md) — frequent checkpoints are
-  essential here.
-- [Multiple Clusters](clusters.md) — when to isolate
-  multi-host TPUs from the rest of your workloads.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`cpu;1em` Accelerators
+:link: ../accelerators
+:link-type: doc
+
+Slice topologies and naming.
+:::
+
+:::{grid-item-card} {octicon}`history;1em` Checkpointing
+:link: checkpointing
+:link-type: doc
+
+Frequent checkpoints are essential here.
+:::
+
+:::{grid-item-card} {octicon}`server;1em` Multiple Clusters
+:link: clusters
+:link-type: doc
+
+When to isolate multi-host TPUs from the rest of your workloads.
+:::
+::::

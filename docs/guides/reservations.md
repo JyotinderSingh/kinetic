@@ -43,13 +43,33 @@ gcloud compute reservations delete my-h100-reservation \
   --project=your-project-id
 ```
 
-> **Note:** Reservations accrue charges based on the reserved machine type regardless of whether VMs are running.
+:::{note}
+Reservations accrue charges based on the reserved machine type regardless of whether VMs are running.
+:::
 
 ## Related pages
 
-- [Cost Optimization](../guides/cost_optimization.md) — when to choose
-  reservations over spot or on-demand.
-- [Multiple Clusters](clusters.md) — isolating reserved capacity in
-  its own cluster.
-- [Accelerators](../accelerators.md) — which accelerators benefit
-  most from reservations.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`graph;1em` Cost Optimization
+:link: cost_optimization
+:link-type: doc
+
+When to choose reservations over spot or on-demand.
+:::
+
+:::{grid-item-card} {octicon}`server;1em` Multiple Clusters
+:link: clusters
+:link-type: doc
+
+Isolating reserved capacity in its own cluster.
+:::
+
+:::{grid-item-card} {octicon}`cpu;1em` Accelerators
+:link: ../accelerators
+:link-type: doc
+
+Which accelerators benefit most from reservations.
+:::
+::::

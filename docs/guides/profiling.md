@@ -97,10 +97,35 @@ captured inside the job.)
 
 ## Related pages
 
-- [Cost Optimization](cost_optimization.md) — a profile shows *where* the
-  accelerator-hours go; that guide shows how to cut the bill.
-- [Checkpointing and Outputs](checkpointing.md) — how `KINETIC_OUTPUT_DIR`
-  keeps your trace after the pod exits.
-- [Dependencies](dependencies.md) — per-job `requirements.txt`.
-- [Distributed Training](distributed_training.md) — multi-host runs where
-  Megascale Stats applies.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`graph;1em` Cost Optimization
+:link: cost_optimization
+:link-type: doc
+
+A profile shows *where* the accelerator-hours go; that guide shows how
+to cut the bill.
+:::
+
+:::{grid-item-card} {octicon}`database;1em` Checkpointing and Outputs
+:link: checkpointing
+:link-type: doc
+
+How `KINETIC_OUTPUT_DIR` keeps your trace after the pod exits.
+:::
+
+:::{grid-item-card} {octicon}`package;1em` Dependencies
+:link: dependencies
+:link-type: doc
+
+Per-job `requirements.txt`.
+:::
+
+:::{grid-item-card} {octicon}`cpu;1em` Distributed Training
+:link: distributed_training
+:link-type: doc
+
+Multi-host runs where Megascale Stats applies.
+:::
+::::

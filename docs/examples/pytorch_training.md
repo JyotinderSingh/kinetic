@@ -108,9 +108,27 @@ def train(): ...
 
 ## Related pages
 
-- [Dependencies](../guides/dependencies.md) — how `torch` gets installed in
-  the remote container.
-- [Accelerators](../accelerators.md) — full list of GPUs and
-  multi-GPU configurations.
-- [Cost Optimization](../guides/cost_optimization.md) — spot capacity for
-  GPU workloads.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`package;1em` Dependencies
+:link: ../guides/dependencies
+:link-type: doc
+
+How `torch` gets installed in the remote container.
+:::
+
+:::{grid-item-card} {octicon}`cpu;1em` Accelerators
+:link: ../accelerators
+:link-type: doc
+
+Full list of GPUs and multi-GPU configurations.
+:::
+
+:::{grid-item-card} {octicon}`zap;1em` Cost Optimization
+:link: ../guides/cost_optimization
+:link-type: doc
+
+Spot capacity for GPU workloads.
+:::
+::::

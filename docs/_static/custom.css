@@ -1,25 +1,1098 @@
-/* Reduce vertical spacing in the left sidebar navigation */
+/* ==========================================================================
+   Kinetic docs theme — a Supabase-inspired reskin of sphinx-book-theme.
+
+   Structure:
+     1. Design tokens (light + dark)
+     2. Base / global
+     3. Primary sidebar (logo, search, nav)
+     4. Article header bar
+     5. Article typography
+     6. Code (inline, blocks, copy button)
+     7. Admonitions
+     8. Tables
+     9. sphinx-design components (cards, badges, buttons, tabs, dropdowns)
+    10. Secondary sidebar (page TOC)
+    11. Prev / next footer + page footer
+    12. API reference (autodoc) signatures
+    13. Search dialog, back-to-top, misc chrome
+    14. Landing-page components (.kinetic-*)
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1. Design tokens
+   -------------------------------------------------------------------------- */
+
+html {
+  --kinetic-brand: #f97316;
+  --kinetic-brand-strong: #ea580c;
+  --kinetic-brand-deep: #9a3412;
+  --pst-font-family-base: "Inter", -apple-system, "Segoe UI", sans-serif;
+  --pst-font-family-heading: "Inter", -apple-system, "Segoe UI", sans-serif;
+  --pst-font-family-monospace: "JetBrains Mono", ui-monospace, "SF Mono",
+    "Cascadia Code", Menlo, Consolas, monospace;
+  --pst-font-weight-heading: 600;
+  --pst-sidebar-font-size: 0.855rem;
+  --pst-sidebar-caption-font-size: 0.6875rem;
+}
+
+html[data-theme="light"] {
+  --pst-color-primary: #c2410c;
+  --pst-color-primary-highlight: #9a3412;
+  --pst-color-secondary: #c2410c;
+  --pst-color-accent: #f97316;
+  --pst-color-background: #ffffff;
+  --pst-color-on-background: #ffffff;
+  --pst-color-surface: #f8f9fa;
+  --pst-color-on-surface: #1c1c1c;
+  --pst-color-border: #e2e5e9;
+  --pst-color-border-muted: #ecedef;
+  --pst-color-heading: #171717;
+  --pst-color-text-base: #3f4550;
+  --pst-color-text-muted: #6b7280;
+  --pst-color-link: #c2410c;
+  --pst-color-link-hover: #9a3412;
+  --pst-color-inline-code: #24292f;
+  --pst-color-inline-code-links: #c2410c;
+  --pst-color-shadow: rgba(16, 24, 40, 0.04);
+  --pst-color-info: #0e7490;
+  --pst-color-info-bg: #f0fbfd;
+  --pst-color-success: #067a57;
+  --pst-color-success-bg: #f0fbf6;
+  --pst-color-warning: #a16207;
+  --pst-color-warning-bg: #fefce8;
+  --pst-color-attention: #a16207;
+  --pst-color-attention-bg: #fefce8;
+  --pst-color-danger: #b91c1c;
+  --pst-color-danger-bg: #fdf3f3;
+  --pst-color-table-row-zebra-high-bg: transparent;
+  --pst-color-table-row-zebra-low-bg: transparent;
+  --pst-color-target: rgba(249, 115, 22, 0.12);
+  --kinetic-code-bg: #f8f9fa;
+  --kinetic-header-bg: rgba(255, 255, 255, 0.86);
+  --kinetic-btn-primary-text: #431407;
+}
+
+html[data-theme="dark"] {
+  --pst-color-primary: #fb923c;
+  --pst-color-primary-highlight: #fdba74;
+  --pst-color-secondary: #fb923c;
+  --pst-color-accent: #f97316;
+  --pst-color-background: #161616;
+  --pst-color-on-background: #161616;
+  --pst-color-surface: #1f1f1f;
+  --pst-color-on-surface: #ededed;
+  --pst-color-border: #2c2c2c;
+  --pst-color-border-muted: #242424;
+  --pst-color-heading: #fafafa;
+  --pst-color-text-base: #c9c9c9;
+  --pst-color-text-muted: #8f8f8f;
+  --pst-color-link: #fb923c;
+  --pst-color-link-hover: #fdba74;
+  --pst-color-inline-code: #e8e8e8;
+  --pst-color-inline-code-links: #fb923c;
+  --pst-color-shadow: rgba(0, 0, 0, 0.25);
+  --pst-color-info: #38bdf8;
+  --pst-color-info-bg: rgba(56, 189, 248, 0.06);
+  --pst-color-success: #3ecf8e;
+  --pst-color-success-bg: rgba(62, 207, 142, 0.06);
+  --pst-color-warning: #facc15;
+  --pst-color-warning-bg: rgba(250, 204, 21, 0.06);
+  --pst-color-attention: #facc15;
+  --pst-color-attention-bg: rgba(250, 204, 21, 0.06);
+  --pst-color-danger: #f87171;
+  --pst-color-danger-bg: rgba(248, 113, 113, 0.06);
+  --pst-color-table-row-zebra-high-bg: transparent;
+  --pst-color-table-row-zebra-low-bg: transparent;
+  --pst-color-target: rgba(249, 115, 22, 0.1);
+  --kinetic-code-bg: #1c1c1c;
+  --kinetic-header-bg: rgba(22, 22, 22, 0.86);
+  --kinetic-btn-primary-text: #431407;
+  color-scheme: dark;
+}
+
+/* --------------------------------------------------------------------------
+   2. Base / global
+   -------------------------------------------------------------------------- */
+
+body {
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-size: 0.9575rem;
+}
+
+::selection {
+  background: rgba(249, 115, 22, 0.25);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--pst-color-border) transparent;
+}
+
+:focus-visible {
+  outline: 2px solid var(--pst-color-accent) !important;
+  outline-offset: 2px;
+}
+
+/* --------------------------------------------------------------------------
+   3. Primary sidebar
+   -------------------------------------------------------------------------- */
+
+.bd-sidebar-primary {
+  background: var(--pst-color-background);
+  border-right: 1px solid var(--pst-color-border-muted);
+  width: 19rem;
+  padding: 1.25rem 1rem;
+  font-size: var(--pst-sidebar-font-size);
+}
+
+/* Logo / wordmark */
+.navbar-brand.logo {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.55rem;
+  padding-bottom: 0.5rem;
+}
+
+.navbar-brand .logo__image,
+.navbar-brand img {
+  height: 1.65rem !important;
+  width: auto;
+}
+
+.navbar-brand .logo__title {
+  font-size: 1.02rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--pst-color-heading);
+}
+
+/* Search field */
+.search-button-field {
+  border: 1px solid var(--pst-color-border);
+  border-radius: 6px;
+  background: var(--pst-color-surface);
+  color: var(--pst-color-text-muted);
+  font-size: 0.8125rem;
+  padding: 0.4rem 0.65rem;
+  transition: border-color 0.15s ease;
+  box-shadow: none;
+}
+
+.search-button-field:hover {
+  border-color: var(--pst-color-text-muted);
+  background: var(--pst-color-surface);
+  box-shadow: none;
+}
+
+.search-button-field .search-button__default-text {
+  font-size: 0.8125rem;
+}
+
+.search-button__kbd-shortcut kbd.kbd-shortcut__modifier,
+.search-button-field kbd {
+  background: var(--pst-color-background);
+  border: 1px solid var(--pst-color-border);
+  border-radius: 4px;
+  color: var(--pst-color-text-muted);
+  font-size: 0.6875rem;
+  font-family: var(--pst-font-family-base);
+  box-shadow: none;
+  padding: 0.1rem 0.3rem;
+}
+
+/* Section captions */
+.bd-links .caption,
+.bd-links p.bd-links__title {
+  font-size: var(--pst-sidebar-caption-font-size) !important;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--pst-color-text-muted);
+  margin-top: 1.6rem !important;
+  margin-bottom: 0.35rem !important;
+}
+
+.bd-links > div:first-child .caption {
+  margin-top: 0.5rem !important;
+}
+
+/* Nav links */
 .bd-links li > a,
 .bd-links li > label {
-    padding-top: 0.3rem !important;
-    padding-bottom: 0.3rem !important;
-    line-height: 1.3 !important;
+  padding-top: 0.28rem !important;
+  padding-bottom: 0.28rem !important;
+  line-height: 1.45 !important;
 }
 
-.bd-links .nav-link {
-    padding-top: 0.3rem !important;
-    padding-bottom: 0.3rem !important;
+.bd-sidenav a {
+  color: var(--pst-color-text-muted);
+  font-size: var(--pst-sidebar-font-size);
+  border-radius: 5px;
+  transition: color 0.12s ease;
 }
 
-/* Adjust the spacing between sections in the sidebar */
-.bd-links .caption {
-    margin-top: 0.75rem !important;
-    margin-bottom: 0.25rem !important;
+.bd-sidenav a:hover {
+  color: var(--pst-color-heading);
+  text-decoration: none;
+  background: transparent;
 }
 
-/* Soften the look of sphinx-design badges (used as tags on examples cards). */
-.sd-badge.sd-bg-secondary {
-    background-color: rgba(108, 117, 125, 0.12) !important;
-    color: var(--pst-color-text-base) !important;
-    font-weight: 500;
+.bd-sidenav li > a.current,
+.bd-sidenav a.current:hover {
+  color: var(--pst-color-primary) !important;
+  font-weight: 500;
+  background: transparent;
+  box-shadow: none;
+}
+
+/* Nested items: hairline guide with green active notch */
+.bd-sidenav .bd-sidenav {
+  border-left: 1px solid var(--pst-color-border-muted);
+  margin-left: 0.75rem;
+  padding-left: 0.25rem;
+}
+
+.bd-sidenav .bd-sidenav li > a.current {
+  box-shadow: -1.25px 0 0 0 var(--pst-color-primary) !important;
+}
+
+/* Collapse chevrons */
+.bd-links label.toctree-toggle {
+  color: var(--pst-color-text-muted);
+}
+
+.bd-links label.toctree-toggle:hover {
+  background: transparent;
+  color: var(--pst-color-heading);
+}
+
+/* Sidebar footer buttons (theme toggle etc. on mobile) */
+.bd-sidebar-primary .sidebar-primary-items__end {
+  border-top: 1px solid var(--pst-color-border-muted);
+}
+
+/* --------------------------------------------------------------------------
+   4. Article header bar
+   -------------------------------------------------------------------------- */
+
+.bd-header-article {
+  background: var(--kinetic-header-bg);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--pst-color-border-muted);
+}
+
+.bd-header-article .btn,
+.bd-header-article .pst-navbar-icon {
+  color: var(--pst-color-text-muted) !important;
+  transition: color 0.12s ease;
+}
+
+.bd-header-article .btn:hover,
+.bd-header-article .pst-navbar-icon:hover {
+  color: var(--pst-color-heading) !important;
+  box-shadow: none;
+}
+
+/* Mobile top navbar */
+.bd-header.bd-navbar {
+  background: var(--pst-color-background);
+  border-bottom: 1px solid var(--pst-color-border-muted);
+  box-shadow: none;
+}
+
+/* --------------------------------------------------------------------------
+   5. Article typography
+   -------------------------------------------------------------------------- */
+
+.bd-article-container {
+  padding: 1.5rem 3.5rem 2rem !important;
+}
+
+.bd-article h1,
+.bd-article h2,
+.bd-article h3,
+.bd-article h4 {
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--pst-color-heading);
+}
+
+.bd-article h1 {
+  font-size: 2.1rem;
+  margin-bottom: 1.1rem;
+}
+
+.bd-article h2 {
+  font-size: 1.45rem;
+  margin-top: 2.75rem;
+  padding-bottom: 0.55rem;
+  border-bottom: 1px solid var(--pst-color-border-muted);
+}
+
+.bd-article h3 {
+  font-size: 1.15rem;
+  margin-top: 2rem;
+}
+
+.bd-article h4 {
+  font-size: 1rem;
+}
+
+.bd-article p,
+.bd-article li {
+  line-height: 1.72;
+}
+
+/* Links: text links keep their underline, but always at a consistent 1px —
+   pydata jumps to a 3px-thick underline on hover, which we normalize away. */
+a,
+a:hover,
+a:focus {
+  text-decoration-thickness: 1px !important;
+  text-underline-offset: 3px;
+}
+
+.bd-article a:not(.sd-btn):not(.headerlink) {
+  color: var(--pst-color-link);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 30%, transparent);
+  transition: color 0.12s ease, text-decoration-color 0.12s ease;
+}
+
+.bd-article a:not(.sd-btn):not(.headerlink):hover {
+  color: var(--pst-color-link-hover);
+  text-decoration-color: currentColor;
+}
+
+.prev-next-area a:hover p.prev-next-title,
+.prev-next-area a:visited:hover p.prev-next-title {
+  color: var(--pst-color-heading);
+}
+
+a.headerlink {
+  color: var(--pst-color-text-muted);
+  font-size: 0.8em;
+}
+
+a.headerlink:hover {
+  color: var(--pst-color-primary);
+}
+
+blockquote {
+  border-left: 2px solid var(--pst-color-border);
+  background: transparent;
+  color: var(--pst-color-text-muted);
+  padding: 0.25rem 0 0.25rem 1.15rem;
+  box-shadow: none;
+}
+
+blockquote p {
+  font-size: 0.95em;
+}
+
+hr.docutils {
+  border-color: var(--pst-color-border-muted);
+  opacity: 1;
+}
+
+kbd:not(.compound) {
+  background: var(--pst-color-surface);
+  border: 1px solid var(--pst-color-border);
+  border-radius: 5px;
+  box-shadow: none;
+  color: var(--pst-color-text-base);
+  font-size: 0.8em;
+  padding: 0.15em 0.45em;
+}
+
+/* --------------------------------------------------------------------------
+   6. Code
+   -------------------------------------------------------------------------- */
+
+/* Inline code */
+code.literal {
+  background: var(--pst-color-surface);
+  border: 1px solid var(--pst-color-border-muted);
+  border-radius: 5px;
+  padding: 0.1em 0.35em;
+  font-size: 0.8em;
+}
+
+a code.literal {
+  color: var(--pst-color-inline-code-links);
+}
+
+/* Code blocks */
+div.highlight {
+  border-radius: 8px;
+}
+
+div.highlight pre {
+  background: var(--kinetic-code-bg);
+  border: 1px solid var(--pst-color-border);
+  border-radius: 8px;
+  padding: 1rem 1.2rem;
+  font-size: 0.8125rem;
+  line-height: 1.65;
+  box-shadow: none;
+}
+
+/* Code block captions */
+div.literal-block-wrapper {
+  border: 1px solid var(--pst-color-border);
+  border-radius: 8px;
+}
+
+div.literal-block-wrapper div.code-block-caption {
+  background: var(--pst-color-surface);
+  border-bottom: 1px solid var(--pst-color-border);
+  border-radius: 8px 8px 0 0;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--pst-color-text-muted);
+}
+
+div.literal-block-wrapper div.highlight pre {
+  border: none;
+  border-radius: 0 0 8px 8px;
+}
+
+/* Copy button (sphinx-copybutton) */
+button.copybtn {
+  background: var(--pst-color-surface);
+  border: 1px solid var(--pst-color-border);
+  border-radius: 6px;
+  width: 1.9em;
+  height: 1.9em;
+  opacity: 0;
+  transition: opacity 0.15s ease, border-color 0.15s ease;
+}
+
+div.highlight:hover button.copybtn,
+button.copybtn:focus-visible {
+  opacity: 1;
+}
+
+button.copybtn:hover {
+  border-color: var(--pst-color-text-muted);
+}
+
+button.copybtn svg {
+  stroke: var(--pst-color-text-muted);
+}
+
+button.copybtn.success {
+  border-color: var(--kinetic-brand);
+}
+
+button.copybtn.success svg {
+  stroke: var(--kinetic-brand);
+}
+
+/* --------------------------------------------------------------------------
+   7. Admonitions
+   -------------------------------------------------------------------------- */
+
+.bd-article .admonition,
+.bd-article div.admonition {
+  border: 1px solid var(--pst-color-border);
+  border-left-width: 1px;
+  border-radius: 8px;
+  background: var(--pst-color-surface);
+  box-shadow: none;
+  font-size: 0.895rem;
+  margin: 1.4rem 0;
+}
+
+/* pydata sets per-type title backgrounds (.admonition.tip > .admonition-title
+   etc.) at higher specificity, which paint a partial band across the title
+   row — flatten them all. */
+.bd-article .admonition > .admonition-title {
+  background: transparent !important;
+  font-weight: 600;
+  font-size: 0.855rem;
+  color: var(--pst-color-heading);
+  margin: 0;
+  padding-top: 0.85rem;
+  padding-bottom: 0.1rem;
+}
+
+.bd-article .admonition > .admonition-title::before {
+  background: transparent !important;
+}
+
+.bd-article .admonition > .admonition-title + * {
+  margin-top: 0.35rem;
+}
+
+.bd-article .admonition p {
+  line-height: 1.65;
+}
+
+/* Type-tinted backgrounds, kept very subtle */
+.bd-article .admonition.note,
+.bd-article .admonition.hint,
+.bd-article .admonition.tip,
+.bd-article .admonition.important,
+.bd-article .admonition.seealso {
+  border-color: color-mix(in srgb, var(--kinetic-brand) 28%, var(--pst-color-border));
+}
+
+.bd-article .admonition.note > .admonition-title::after,
+.bd-article .admonition.hint > .admonition-title::after,
+.bd-article .admonition.tip > .admonition-title::after,
+.bd-article .admonition.important > .admonition-title::after,
+.bd-article .admonition.seealso > .admonition-title::after {
+  color: var(--kinetic-brand);
+}
+
+.bd-article .admonition.warning > .admonition-title::after,
+.bd-article .admonition.caution > .admonition-title::after,
+.bd-article .admonition.attention > .admonition-title::after {
+  color: var(--pst-color-warning);
+}
+
+.bd-article .admonition.warning,
+.bd-article .admonition.caution,
+.bd-article .admonition.attention {
+  border-color: color-mix(in srgb, var(--pst-color-warning) 30%, var(--pst-color-border));
+}
+
+.bd-article .admonition.danger > .admonition-title::after,
+.bd-article .admonition.error > .admonition-title::after {
+  color: var(--pst-color-danger);
+}
+
+.bd-article .admonition.danger,
+.bd-article .admonition.error {
+  border-color: color-mix(in srgb, var(--pst-color-danger) 30%, var(--pst-color-border));
+}
+
+/* --------------------------------------------------------------------------
+   8. Tables
+   -------------------------------------------------------------------------- */
+
+.bd-article table {
+  font-size: 0.875rem;
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.bd-article table thead tr {
+  border-bottom: 1px solid var(--pst-color-border);
+}
+
+.bd-article table thead th {
+  background: transparent;
+  color: var(--pst-color-text-muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-align: left;
+  padding: 0.5rem 0.9rem 0.5rem 0;
+  border: none;
+}
+
+.bd-article table tbody td {
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--pst-color-border-muted);
+  padding: 0.65rem 0.9rem 0.65rem 0;
+  color: var(--pst-color-text-base);
+  vertical-align: top;
+}
+
+.bd-article table tbody tr:hover {
+  background: transparent;
+}
+
+.bd-article table p {
+  margin-bottom: 0.35rem;
+}
+
+/* --------------------------------------------------------------------------
+   9. sphinx-design components
+   -------------------------------------------------------------------------- */
+
+/* Cards */
+.sd-card {
+  border: 1px solid var(--pst-color-border) !important;
+  border-radius: 10px !important;
+  background: var(--pst-color-surface);
+  box-shadow: none !important;
+  transition: border-color 0.15s ease, background 0.15s ease;
+  overflow: hidden;
+}
+
+.sd-card:hover {
+  transform: none !important;
+}
+
+.sd-card:has(.sd-stretched-link):hover {
+  border-color: color-mix(in srgb, var(--kinetic-brand) 55%, var(--pst-color-border)) !important;
+}
+
+.sd-card .sd-card-body {
+  background: transparent;
+  padding: 1.1rem 1.2rem;
+  font-size: 0.855rem;
+  color: var(--pst-color-text-muted);
+  line-height: 1.6;
+}
+
+.sd-card .sd-card-title {
+  font-size: 0.9575rem;
+  font-weight: 600;
+  color: var(--pst-color-heading);
+  margin-bottom: 0.5rem;
+}
+
+.sd-card .sd-card-title .sd-octicon {
+  color: var(--kinetic-brand);
+  margin-right: 0.3rem;
+  vertical-align: -0.15em;
+}
+
+.sd-card .sd-card-footer {
+  background: transparent;
+  border-top: none !important;
+  padding: 0 1.2rem 1rem;
+  font-size: 0.8rem;
+}
+
+.sd-card .sd-card-header {
+  background: transparent;
+  border-bottom: none !important;
+  padding: 1rem 1.2rem 0;
+  font-weight: 600;
+  color: var(--pst-color-heading);
+}
+
+/* Badges — quiet outline pills */
+.sd-badge,
+.sd-badge.sd-bg-secondary,
+.sd-badge.sd-bg-primary {
+  background: transparent !important;
+  border: 1px solid var(--pst-color-border);
+  border-radius: 999px;
+  color: var(--pst-color-text-muted) !important;
+  font-size: 0.6875rem !important;
+  font-weight: 500;
+  padding: 0.22em 0.65em;
+  letter-spacing: 0.01em;
+}
+
+.sd-badge.sd-bg-success,
+.sd-badge.sd-outline-success {
+  border-color: color-mix(in srgb, var(--kinetic-brand) 50%, var(--pst-color-border));
+  color: var(--pst-color-primary) !important;
+}
+
+/* Buttons. The `html` prefix matches pydata's own `html .sd-btn-*:hover`
+   overrides so ours win on equal specificity + later source order. */
+html .sd-btn {
+  border-radius: 6px !important;
+  font-weight: 500 !important;
+  font-size: 0.875rem !important;
+  padding: 0.45rem 1rem !important;
+  transition: background 0.15s ease, border-color 0.15s ease !important;
+  box-shadow: none !important;
+}
+
+html .sd-btn:hover,
+html .sd-btn:focus {
+  text-decoration: none !important;
+}
+
+html .sd-btn-primary,
+html .sd-btn-success {
+  background: var(--kinetic-brand) !important;
+  border: 1px solid var(--kinetic-brand-strong) !important;
+  color: var(--kinetic-btn-primary-text) !important;
+}
+
+html .sd-btn-primary:hover,
+html .sd-btn-primary:focus,
+html .sd-btn-success:hover,
+html .sd-btn-success:focus {
+  background: #fb923c !important;
+  border-color: var(--kinetic-brand) !important;
+  color: var(--kinetic-btn-primary-text) !important;
+}
+
+html .sd-btn-secondary,
+html .sd-btn-outline-primary,
+html .sd-btn-outline-secondary {
+  background: var(--pst-color-surface) !important;
+  border: 1px solid var(--pst-color-border) !important;
+  color: var(--pst-color-heading) !important;
+}
+
+html .sd-btn-secondary:hover,
+html .sd-btn-secondary:focus,
+html .sd-btn-outline-primary:hover,
+html .sd-btn-outline-secondary:hover {
+  border-color: var(--pst-color-text-muted) !important;
+  background: var(--pst-color-surface) !important;
+  color: var(--pst-color-heading) !important;
+}
+
+/* Tabs */
+.sd-tab-set {
+  margin: 1.25rem 0;
+}
+
+.sd-tab-set > label {
+  font-size: 0.855rem;
+  font-weight: 500;
+  color: var(--pst-color-text-muted);
+  border-bottom: 2px solid transparent;
+  padding: 0.5rem 0.15rem;
+  margin-right: 1.25rem;
+  transition: color 0.12s ease;
+}
+
+.sd-tab-set > label:hover {
+  color: var(--pst-color-heading);
+  border-color: transparent;
+}
+
+.sd-tab-set > input:checked + label {
+  color: var(--pst-color-primary);
+  border-color: var(--pst-color-primary);
+}
+
+.sd-tab-set > .sd-tab-content {
+  border-top: 1px solid var(--pst-color-border-muted);
+  box-shadow: none;
+  padding: 1rem 0 0;
+}
+
+/* Dropdowns / details */
+details.sd-dropdown {
+  border: 1px solid var(--pst-color-border) !important;
+  border-radius: 8px !important;
+  box-shadow: none !important;
+}
+
+details.sd-dropdown summary.sd-summary-title {
+  background: var(--pst-color-surface) !important;
+  color: var(--pst-color-heading);
+  font-weight: 500;
+  font-size: 0.895rem;
+  border-left: none !important;
+}
+
+details.sd-dropdown .sd-summary-content {
+  background: transparent;
+  font-size: 0.895rem;
+}
+
+/* --------------------------------------------------------------------------
+   10. Secondary sidebar (page TOC)
+   -------------------------------------------------------------------------- */
+
+.bd-sidebar-secondary {
+  background: var(--pst-color-background);
+  border-left: none;
+  font-size: 0.8125rem;
+}
+
+.bd-toc .onthispage,
+.page-toc .tocsection {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--pst-color-text-muted);
+  border-bottom: none;
+}
+
+.bd-toc nav.page-toc > ul {
+  border-left: 1px solid var(--pst-color-border-muted);
+  padding-left: 0;
+}
+
+/* pydata pulls TOC links onto the rail with `.toc-entry a.nav-link
+   { margin-left: -1rem; padding-left: 1rem }` — reset the geometry at
+   higher specificity so text always clears the rail. */
+.bd-toc nav a,
+.bd-toc .nav-link,
+.bd-toc .toc-entry a.nav-link {
+  display: block;
+  color: var(--pst-color-text-muted);
+  font-size: 0.8125rem;
+  margin-left: 0;
+  padding: 0.25rem 0 0.25rem 0.85rem;
+  transition: color 0.12s ease;
+}
+
+.bd-toc nav a:hover,
+.bd-toc .toc-entry a.nav-link:hover {
+  color: var(--pst-color-heading);
+  text-decoration: none;
+}
+
+/* The active link paints its own 1px indicator directly over the rail */
+.bd-toc nav a.active,
+.bd-toc .toc-entry a.nav-link.active {
+  color: var(--pst-color-primary) !important;
+  border-left: 1px solid var(--pst-color-primary);
+  margin-left: -1px;
+  box-shadow: none;
+  background: transparent;
+}
+
+/* --------------------------------------------------------------------------
+   11. Prev / next footer + page footer
+   -------------------------------------------------------------------------- */
+
+.prev-next-area {
+  border-top: 1px solid var(--pst-color-border-muted);
+  padding-top: 1.25rem;
+  margin-top: 2.5rem;
+}
+
+.prev-next-area a {
+  border: 1px solid var(--pst-color-border);
+  border-radius: 8px;
+  padding: 0.7rem 1rem;
+  max-width: 48%;
+  transition: border-color 0.15s ease;
+  text-decoration: none !important;
+}
+
+.prev-next-area a:hover {
+  border-color: color-mix(in srgb, var(--kinetic-brand) 55%, var(--pst-color-border));
+  text-decoration: none;
+}
+
+.prev-next-area a .prev-next-info .prev-next-subtitle {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--pst-color-text-muted);
+}
+
+.prev-next-area a .prev-next-info .prev-next-title {
+  color: var(--pst-color-heading);
+  font-size: 0.895rem;
+  font-weight: 500;
+}
+
+.prev-next-area i.fa-solid {
+  color: var(--pst-color-text-muted);
+}
+
+.bd-footer {
+  background: transparent;
+  border-top: 1px solid var(--pst-color-border-muted);
+  font-size: 0.8125rem;
+  color: var(--pst-color-text-muted);
+}
+
+.bd-footer a {
+  color: var(--pst-color-text-muted);
+}
+
+/* --------------------------------------------------------------------------
+   12. API reference (autodoc) signatures
+   -------------------------------------------------------------------------- */
+
+.bd-article dl.py > dt,
+.bd-article dl.std > dt.sig {
+  background: var(--pst-color-surface);
+  border: 1px solid var(--pst-color-border-muted);
+  border-left: 2px solid var(--kinetic-brand);
+  border-radius: 6px;
+  padding: 0.6rem 0.9rem;
+  font-size: 0.845rem;
+}
+
+.bd-article dl.py > dt:target,
+.bd-article dl.std > dt.sig:target {
+  border-color: var(--kinetic-brand);
+  background: var(--pst-color-target);
+}
+
+.sig-name,
+code.sig-name {
+  color: var(--pst-color-heading);
+}
+
+.sig-prename,
+code.sig-prename {
+  color: var(--pst-color-text-muted);
+}
+
+em.sig-param .n,
+.sig-param .default_value {
+  color: var(--pst-color-text-muted);
+}
+
+/* Field lists inside API entries (Parameters / Returns / Raises) */
+.bd-article dl.field-list > dt {
+  background: transparent;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--pst-color-text-muted);
+}
+
+/* --------------------------------------------------------------------------
+   13. Search dialog, back-to-top, misc chrome
+   -------------------------------------------------------------------------- */
+
+dialog#pst-search-dialog {
+  border: 1px solid var(--pst-color-border);
+  border-radius: 12px;
+  background: var(--pst-color-background);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.35);
+}
+
+dialog#pst-search-dialog .bd-search {
+  border-radius: 8px;
+  background: var(--pst-color-surface);
+}
+
+dialog#pst-search-dialog input.form-control {
+  background: transparent;
+  color: var(--pst-color-heading);
+}
+
+#pst-back-to-top {
+  background: var(--pst-color-surface);
+  border: 1px solid var(--pst-color-border);
+  border-radius: 999px;
+  color: var(--pst-color-text-base);
+  box-shadow: 0 4px 16px var(--pst-color-shadow);
+  font-size: 0.8125rem;
+}
+
+#pst-back-to-top:hover {
+  background: var(--pst-color-surface);
+  border-color: var(--kinetic-brand);
+  color: var(--pst-color-heading);
+}
+
+/* --------------------------------------------------------------------------
+   14. Landing-page components
+   -------------------------------------------------------------------------- */
+
+/* Hero. Headings cannot live inside a container directive, so the landing
+   H1 is targeted from the article container when a hero block is present. */
+.bd-article-container:has(.kinetic-hero) h1 {
+  font-size: 2.55rem;
+  line-height: 1.15;
+  letter-spacing: -0.03em;
+  margin-bottom: 1rem;
+  max-width: 36rem;
+}
+
+.kinetic-hero {
+  padding: 0 0 0.5rem;
+}
+
+.kinetic-hero .kinetic-lede,
+.kinetic-lede {
+  font-size: 1.06rem;
+  line-height: 1.65;
+  color: var(--pst-color-text-muted);
+  max-width: 38rem;
+}
+
+.kinetic-hero-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem;
+  margin: 1.4rem 0 2rem;
+}
+
+.kinetic-hero-buttons p {
+  margin: 0;
+}
+
+/* Small green eyebrow label above a heading */
+.kinetic-eyebrow p,
+.kinetic-eyebrow {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--pst-color-primary);
+  margin-bottom: 0.4rem;
+}
+
+/* Numbered vertical steps (Supabase-quickstart style).
+   Usage: wrap a MyST ordered list in :::{container} kinetic-steps */
+.kinetic-steps ol {
+  list-style: none;
+  counter-reset: kinetic-step;
+  margin: 1.25rem 0;
+  padding-left: 0;
+}
+
+.kinetic-steps ol > li {
+  counter-increment: kinetic-step;
+  position: relative;
+  padding: 0 0 1.75rem 3.15rem;
+  margin: 0;
+}
+
+.kinetic-steps ol > li::before {
+  content: counter(kinetic-step);
+  position: absolute;
+  left: 0;
+  top: -0.1rem;
+  width: 2.1rem;
+  height: 2.1rem;
+  border-radius: 50%;
+  border: 1px solid var(--pst-color-border);
+  background: var(--pst-color-surface);
+  color: var(--pst-color-heading);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  display: grid;
+  place-items: center;
+}
+
+.kinetic-steps ol > li::after {
+  content: "";
+  position: absolute;
+  left: 1.05rem;
+  top: 2.2rem;
+  bottom: 0.2rem;
+  width: 1px;
+  background: var(--pst-color-border-muted);
+}
+
+.kinetic-steps ol > li:last-child {
+  padding-bottom: 0.25rem;
+}
+
+.kinetic-steps ol > li:last-child::after {
+  display: none;
+}
+
+/* Steps lead with a bold phrase inside the first paragraph (`**Discover.**`);
+   only that <strong> lead should stand out — the rest stays regular text. */
+.kinetic-steps ol > li strong {
+  color: var(--pst-color-heading);
+}
+
+/* Responsive tweaks */
+@media (max-width: 959px) {
+  .bd-article-container {
+    padding: 1.25rem 1.5rem 2rem !important;
+  }
+
+  .kinetic-hero h1 {
+    font-size: 2.1rem;
+  }
 }

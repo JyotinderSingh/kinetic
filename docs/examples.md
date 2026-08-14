@@ -19,13 +19,13 @@ examples/tunix_sft
 
 A catalog of runnable example scripts using Kinetic. Every example below is rendered directly on this site and is also available as a raw Python script in the GitHub repository.
 
-Tier badges:
+Examples are grouped into three tiers:
 
-- **Quickstart:** your first run. Minimal setup, sensible defaults.
-- **Core:** the everyday product surface: async jobs, data, checkpoints,
-  parallel sweeps.
-- **Advanced:** multi-host Pathways jobs, LLM fine-tuning, anything that
-  needs special quota or external credentials.
+- {bdg-success}`Quickstart` — your first run. Minimal setup, sensible defaults.
+- {bdg-secondary}`Core` — the everyday product surface: async jobs, data,
+  checkpoints, parallel sweeps.
+- {bdg-secondary}`Advanced` — multi-host Pathways jobs, LLM fine-tuning,
+  anything that needs special quota or external credentials.
 
 To run any example: clone the repo, install Kinetic, set `KINETIC_PROJECT`,
 and `python examples/<file>.py`.

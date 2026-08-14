@@ -12,8 +12,10 @@ You (or your employer) retain the copyright to your contribution; this simply
 gives us permission to use and redistribute your contributions as part of the
 project.
 
+:::{note}
 If you or your current employer have already signed the Google CLA (even if it
 was for a different project), you probably don't need to do it again.
+:::
 
 Visit <https://cla.developers.google.com/> to see your current agreements or to
 sign a new one.
@@ -68,7 +70,7 @@ Before submitting a pull request, please ensure your changes pass linting and un
   | `E2E_TESTS`       | Yes      | —               | Set to `1` to enable e2e tests |
   | `KINETIC_PROJECT` | Yes      | —               | Google Cloud project ID        |
   | `KINETIC_ZONE`    | No       | `us-central1-a` | GKE cluster zone               |
-| `KINETIC_CLUSTER` | No       | `kinetic-cluster` | GKE cluster name               |
+  | `KINETIC_CLUSTER` | No       | `kinetic-cluster` | GKE cluster name             |
 
   **Run all e2e tests:**
 
@@ -82,7 +84,9 @@ Before submitting a pull request, please ensure your changes pass linting and un
   E2E_TESTS=1 KINETIC_PROJECT=my-project python -m pytest tests/e2e/cpu_execution_test.py -v
   ```
 
+  :::{tip}
   Drop `-n auto` to run tests serially to make it easier to debug.
+  :::
 
 ### Submitting changes
 
@@ -113,23 +117,25 @@ sphinx-autobuild docs /tmp/docs
 
 To release a new version of the package to PyPI, follow these steps:
 
-1. Install the release dependencies:
+:::{container} kinetic-steps
+1. **Install the release dependencies.**
    ```bash
    uv pip install -e ".[release]"
    ```
-2. Bump the version in the following files:
+2. **Bump the version** in the following files:
    - [pyproject.toml](../pyproject.toml)
    - [version.py](../kinetic/version.py)
-3. Build the source distribution and wheel:
+3. **Build the source distribution and wheel.**
    ```bash
    python3 -m build
    ```
-4. Upload the packages to PyPI using `twine`. To avoid `twine` hanging while waiting for interactive input, provide your credentials via environment variables (e.g. using an API token) or a `~/.pypirc` file:
+4. **Upload the packages to PyPI** using `twine`. To avoid `twine` hanging while waiting for interactive input, provide your credentials via environment variables (e.g. using an API token) or a `~/.pypirc` file:
    ```bash
    TWINE_USERNAME=__token__ TWINE_PASSWORD=pypi-... python3 -m twine upload dist/*
    ```
-5. Create a new release on GitHub using the `gh` CLI, e.g.:
+5. **Create a new release on GitHub** using the `gh` CLI, e.g.:
    ```bash
    gh release create 0.0.2
    ```
+:::
 

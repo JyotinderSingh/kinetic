@@ -31,6 +31,7 @@ def train():
   return f"saved to {output_dir}"
 ```
 
+:::{seealso}
 For full Orbax-managed auto-resume with JAX or Keras, the canonical
 runnable examples live in the repo:
 
@@ -38,6 +39,7 @@ runnable examples live in the repo:
   — JAX + Orbax with auto-resume.
 - [`examples/example_keras_checkpoint.py`](https://github.com/keras-team/kinetic/blob/main/examples/example_keras_checkpoint.py)
   — same pattern using `model.get_weights()` / `set_weights()`.
+:::
 
 ## Outputs and checkpoints
 
@@ -102,27 +104,35 @@ you want a checkpoint to outlive a month:
 - Or set `output_dir=` to a bucket you manage yourself, with whatever
   lifecycle rules you want.
 
+:::{note}
 `JobHandle.cleanup(gcs=True)` removes the per-job artifacts under the
 GCS prefix used for code and result payloads — it does **not** touch
 files you wrote under `KINETIC_OUTPUT_DIR`. Outputs survive cleanup.
+:::
 
 ## Copy-paste checklist
 
 A short checklist for any long-running job that you don't want to redo
 from scratch:
 
-- [ ] Read `KINETIC_OUTPUT_DIR` inside the function and write everything
-      durable under it.
-- [ ] Write checkpoints to a stable subdirectory (e.g.
-      `$KINETIC_OUTPUT_DIR/checkpoints/`) so the resume path is
-      predictable.
-- [ ] Choose a checkpoint cadence that bounds how much work a restart
-      would lose (every N steps, or every M minutes).
-- [ ] Verify resume works locally before the long run — submit the same
-      function twice with the same `output_dir` and confirm the second
-      call picks up where the first left off.
-- [ ] If the run is critical, copy the final artifacts to a bucket
-      without the 30-day TTL after success.
+:::{container} kinetic-steps
+1. **Read `KINETIC_OUTPUT_DIR`** inside the function and write everything
+   durable under it.
+
+2. **Write checkpoints to a stable subdirectory** (e.g.
+   `$KINETIC_OUTPUT_DIR/checkpoints/`) so the resume path is
+   predictable.
+
+3. **Choose a checkpoint cadence** that bounds how much work a restart
+   would lose (every N steps, or every M minutes).
+
+4. **Verify resume works locally** before the long run — submit the same
+   function twice with the same `output_dir` and confirm the second
+   call picks up where the first left off.
+
+5. **If the run is critical**, copy the final artifacts to a bucket
+   without the 30-day TTL after success.
+:::
 
 ## JAX example
 
@@ -149,8 +159,27 @@ After the snippet:
 
 ## Related pages
 
-- [Data](data.md) — input side of the I/O story.
-- [Managing Async Jobs](async_jobs.md) — long jobs are also
-  the place where you most want detached submission.
-- [Cost Optimization](cost_optimization.md) — spot instances make
-  checkpointing essential.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`database;1em` Data
+:link: data
+:link-type: doc
+
+Input side of the I/O story.
+:::
+
+:::{grid-item-card} {octicon}`clock;1em` Managing Async Jobs
+:link: async_jobs
+:link-type: doc
+
+Long jobs are also the place where you most want detached submission.
+:::
+
+:::{grid-item-card} {octicon}`graph;1em` Cost Optimization
+:link: cost_optimization
+:link-type: doc
+
+Spot instances make checkpointing essential.
+:::
+::::

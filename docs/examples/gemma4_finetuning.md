@@ -55,7 +55,7 @@ This pattern is covered in depth in the [Environment Variables](../guides/env_va
 
 `keras-hub` and its tokenizer backends are not installed in the Kinetic base container by default. Add a `requirements.txt` to your project so Kinetic picks them up automatically:
 
-```
+```text
 keras==3.13.2
 keras-hub==0.27.1
 tokenizers==0.22.2
@@ -78,7 +78,11 @@ Four things are worth understanding before reading the code:
 
 **Custom weight loading.** The Kaggle preset stores weights across 6 sharded H5 files described by a `model.weights.json` manifest. Keras's built-in `load_weights()` on the full `CausalLM` prepends a `backbone/` prefix that mismatches every path in the manifest. Loading via `model.backbone.load_weights()` avoids that prefix, but Keras ≤ 3.14 has a bug in `ShardedH5IOStore`: after switching to a different shard file, the internal `current_shard_path` pointer is not updated. When a subsequent `keys()` call restores to the stale path, layers whose weights span multiple shards — every MoE expert bank and the token embedding — fail to load, producing a "received 0 variables" error. The solution is to bypass `ShardedH5IOStore` entirely and read the H5 files directly with h5py, pre-sharding each tensor with `jax.device_put` before assigning it to avoid a memory spike on device 0. The complete loader is implemented as `_load_sharded_weights()` in [`examples/gemma4_finetuning.py`](../../examples/gemma4_finetuning/gemma4_finetuning.py).
 
-> **TODO:** remove `_load_sharded_weights` once Keras exposes a public loading path that handles the `backbone/` prefix correctly and fixes the `ShardedH5IOStore` shard-switching bug.
+:::{admonition} TODO
+:class: note
+
+Remove `_load_sharded_weights` once Keras exposes a public loading path that handles the `backbone/` prefix correctly and fixes the `ShardedH5IOStore` shard-switching bug.
+:::
 
 The code below assumes `_load_sharded_weights` and `_make_layout_map` are defined as in [`examples/gemma4_finetuning.py`](../../examples/gemma4_finetuning/gemma4_finetuning.py).
 
@@ -324,7 +328,9 @@ if __name__ == "__main__":
 
 ## Cleaning Up
 
+:::{warning}
 TPU node pools accrue cost while they exist, even when no job is running. Remove resources when you are done to avoid unnecessary charges.
+:::
 
 Remove the v5litepod-8 pool while keeping the cluster intact for other workloads:
 
@@ -344,5 +350,20 @@ kinetic down --project your-project-id
 
 ## Next Steps
 
-- **Checkpointing during training:** use Orbax to save intermediate checkpoints so a long run can resume if interrupted. See the [Checkpointing](../guides/checkpointing.md) guide.
-- **Distributed training:** scale to larger TPU slices or multiple hosts. See the [Distributed Training](../guides/distributed_training.md) guide.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`history;1em` Checkpointing during training
+:link: ../guides/checkpointing
+:link-type: doc
+
+Use Orbax to save intermediate checkpoints so a long run can resume if interrupted.
+:::
+
+:::{grid-item-card} {octicon}`server;1em` Distributed training
+:link: ../guides/distributed_training
+:link-type: doc
+
+Scale to larger TPU slices or multiple hosts.
+:::
+::::

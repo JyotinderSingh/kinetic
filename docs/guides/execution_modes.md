@@ -96,7 +96,9 @@ def train(): ...
 blessed prebuilt base images. Before you can use prebuilt mode, run
 `kinetic build-image --repo <your-repo>` once and set
 `KINETIC_BASE_IMAGE_REPO=<your-repo>` (or pass `base_image_repo=` to the
-decorator). See [Container Images](containers.md) for the full
+decorator). Kinetic builds the image tag from the version of your
+installed Kinetic client. If you upgrade the client, publish a base image
+with the new tag first. See [Container Images](containers.md) for the full
 workflow.
 :::
 
@@ -168,21 +170,67 @@ The dispatch happens at job submit time inside the backend execution path
 In all three modes, two more things happen regardless of which mode you
 picked:
 
-- **Your function and its captured closures** are pickled with
-  `cloudpickle` and uploaded to GCS. The runner inside the pod downloads
-  them, unpickles your function, and calls it.
-- **Your entire local working directory** is zipped into a `context.zip`
-  and uploaded to GCS (paths wrapped in `Data(...)` are excluded to avoid
-  redundant uploads). The runner extracts it into the pod's workspace
-  before your function runs, so any local modules, helper scripts, or
-  config files your code imports or reads are available on the remote.
-  This matters most for **custom image mode**: the image is responsible
-  for installed packages, but your project source still travels with the
-  job — you don't need to bake it into the image.
+- **Your function and its captured closures.** Kinetic pickles them with
+  `cloudpickle` and uploads them to Cloud Storage. Kinetic serializes the
+  modules of your own project by value, so the pod does not import them.
+  The runner in the pod downloads the payload, unpickles your function,
+  and calls it.
+- **Your project source.** Kinetic zips it into a `context.zip` file and
+  uploads that file to Cloud Storage. The archive starts at the *package
+  root*, not at the directory of the script that you ran. Kinetic first
+  walks up out of every directory that holds an `__init__.py` file.
+  Kinetic then walks up to the nearest directory that holds a
+  `pyproject.toml`, `requirements.txt`, `setup.py`, `setup.cfg`, or `.git`
+  entry. Kinetic excludes the paths in your `Data(...)` objects and the
+  default exclusion list (`.venv`, `node_modules`, and the cache
+  directories).
+
+The runner extracts the archive into the workspace of the pod. The runner
+then rebuilds `sys.path` and changes to the workspace directory that
+matches your client working directory. Your imports and your relative-path
+reads thus operate as they do on your machine. This is most important in
+**custom image mode**: the image supplies the installed packages, but
+Kinetic still ships your project source with the job. You do not put the
+source into the image.
+
+[What Ships to the Pod](packaging.md) gives the full contract:
+
+- Root detection.
+- Exclusions and `.kineticignore`.
+- The rules for the working directory and for `sys.path`.
+- The guarantees for argument types.
+- Version matching between your client and the pod.
 
 ## Related pages
 
-- [Dependencies](dependencies.md) — how Kinetic discovers what to install.
-- [Container Images](containers.md) — base-image workflow and
-  `kinetic build-image`.
-- [Getting Started](../getting_started.md) — your first run end-to-end.
+::::{grid} 1 1 2 2
+:gutter: 3
+
+:::{grid-item-card} {octicon}`file-directory;1em` What Ships to the Pod
+:link: packaging
+:link-type: doc
+
+The full packaging contract.
+:::
+
+:::{grid-item-card} {octicon}`package;1em` Dependencies
+:link: dependencies
+:link-type: doc
+
+How Kinetic discovers what to install.
+:::
+
+:::{grid-item-card} {octicon}`stack;1em` Container Images
+:link: containers
+:link-type: doc
+
+Base-image workflow and `kinetic build-image`.
+:::
+
+:::{grid-item-card} {octicon}`rocket;1em` Getting Started
+:link: ../getting_started
+:link-type: doc
+
+Your first run end-to-end.
+:::
+::::
