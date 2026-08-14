@@ -68,7 +68,15 @@ docs = [
     "myst_nb",
     "sphinx",
     "sphinx_autobuild",
-    "sphinx_book_theme",
+    # Pin the theme pair. sphinx-book-theme 1.4.0 with pydata-sphinx-theme
+    # 0.20.0 renders a second, zero-size set of sidebar toggle buttons inside
+    # .bd-header, and pydata's JS binds its click handlers with
+    # querySelector(".primary-toggle"), which matches those hidden buttons
+    # instead of the visible ones in .bd-header-article. The mobile menus then
+    # never open. The same pair renders the persistent search box three times.
+    # Left unpinned, Read the Docs resolves that broken combination.
+    "sphinx_book_theme==1.2.0",
+    "pydata-sphinx-theme==0.16.1",
     "sphinx-click",
     "sphinx-copybutton",
     "sphinx-design",
