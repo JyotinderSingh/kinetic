@@ -80,6 +80,16 @@ html_theme_options = {
     "text": "⚡ Kinetic",
   },
 }
+# The search page renders its own search box in the body, so drop the
+# sidebar's persistent one there — otherwise the page shows two.
+# Mirrors the theme default minus "search-button-field.html".
+html_sidebars = {
+  "search": [
+    "navbar-logo.html",
+    "icon-links.html",
+    "sbt-sidebar-nav.html",
+  ],
+}
 html_static_path = ["_static"]
 html_css_files = [
   "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap",
