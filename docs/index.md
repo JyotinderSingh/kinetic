@@ -84,12 +84,15 @@ Browse examples
 ```python
 import kinetic
 
+
 @kinetic.run(accelerator="tpu-v6e-8")
 def train_model():
-    import keras
-    model = keras.Sequential([...])
-    model.fit(x_train, y_train)
-    return model.history.history["loss"][-1]
+  import keras
+
+  model = keras.Sequential([...])
+  model.fit(x_train, y_train)
+  return model.history.history["loss"][-1]
+
 
 final_loss = train_model()  # runs on a TPU v6e-8 slice
 ```
