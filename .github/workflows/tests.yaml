@@ -29,11 +29,32 @@ jobs:
       - name: Install dependencies
         run: uv pip install --system -e ".[test]"
 
+      - name: Install fake-gcs-server
+        # Storage-touching tests run against this emulator (the canonical
+        # transport — no GCS mocks); without the binary they self-skip.
+        env:
+          FAKE_GCS_SERVER_VERSION: "1.55.1"
+          FAKE_GCS_SERVER_SHA256: "048b5cbf33b5a8706dfa71cedb552efca22cb35b6a999e738b2ddfa01383453d"
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/fake-gcs-server.tar.gz" \
+            "https://github.com/fsouza/fake-gcs-server/releases/download/v${FAKE_GCS_SERVER_VERSION}/fake-gcs-server_${FAKE_GCS_SERVER_VERSION}_Linux_amd64.tar.gz"
+          echo "$FAKE_GCS_SERVER_SHA256  $RUNNER_TEMP/fake-gcs-server.tar.gz" | sha256sum -c -
+          tar -C "$RUNNER_TEMP" -xzf "$RUNNER_TEMP/fake-gcs-server.tar.gz" fake-gcs-server
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
       - name: Run unit tests
         run: >
           coverage run
           -m unittest discover
           -s kinetic -p "*_test.py"
+          -v
+
+      - name: Run integration tests
+        run: >
+          coverage run -a
+          -m unittest discover
+          -s tests/integration -t .
+          -p "*_test.py"
           -v
 
       - name: Generate coverage report
