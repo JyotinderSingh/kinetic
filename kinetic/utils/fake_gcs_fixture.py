@@ -102,10 +102,19 @@ def _free_port():
 
 
 class FakeGcsServer:
-  """A fake-gcs-server subprocess bound to a free localhost port."""
+  """A fake-gcs-server subprocess bound to a free localhost port.
 
-  def __init__(self):
+  Args:
+      advertised_host: Hostname (no port) to advertise in URLs the
+          server hands back to clients (resumable-upload sessions,
+          object links).  Defaults to 127.0.0.1; the docker test tier
+          passes ``host.docker.internal`` so containers can follow
+          those URLs back to the host.
+  """
+
+  def __init__(self, advertised_host="127.0.0.1"):
     self.port = None
+    self.advertised_host = advertised_host
     self._process = None
     self._stderr_file = None
 
@@ -137,9 +146,9 @@ class FakeGcsServer:
         "-port",
         str(self.port),
         "-external-url",
-        self.host,
+        f"http://{self.advertised_host}:{self.port}",
         "-public-host",
-        f"127.0.0.1:{self.port}",
+        f"{self.advertised_host}:{self.port}",
       ],
       stdout=subprocess.DEVNULL,
       stderr=self._stderr_file,
