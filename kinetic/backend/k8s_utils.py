@@ -274,6 +274,9 @@ def collect_pod_failure_details(core_v1_client, job_name, namespace, tail=30):
 
   fetched = 0
   for pod in pods:
+    # A just-(re)created pod may not have a status yet.
+    if pod.status is None:
+      continue
     summary = _pod_exit_summary(pod)
     if not summary and pod.status.phase != "Failed":
       continue
