@@ -33,6 +33,9 @@ from absl.testing import parameterized
 
 _STARTUP_TIMEOUT_SECONDS = 15
 _PROBE_INTERVAL_SECONDS = 0.05
+# Applied to every JSON-API request so a wedged emulator fails the test
+# quickly instead of hanging the suite.
+_HTTP_TIMEOUT_SECONDS = 10
 
 TEST_PROJECT = "test-project"
 
@@ -165,20 +168,29 @@ class FakeGcsServer:
     )
 
   def stop(self):
-    """Terminate the server subprocess."""
-    if self._process is None:
-      return
-    self._process.terminate()
-    try:
-      self._process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-      self._process.kill()
-      self._process.wait()
-    finally:
-      if self._stderr_file is not None:
-        self._stderr_file.close()
-        self._stderr_file = None
-      self._process = None
+    """Terminate the server subprocess and release its stderr file.
+
+    Safe to call at any point of the lifecycle: a half-started server
+    (Popen failed after the stderr file was created) still gets its
+    file closed, and an already-dead process is not an error.
+    """
+    if self._process is not None:
+      try:
+        self._process.terminate()
+        self._process.wait(timeout=10)
+      except subprocess.TimeoutExpired:
+        try:
+          self._process.kill()
+          self._process.wait()
+        except OSError:
+          pass
+      except OSError:
+        pass
+      finally:
+        self._process = None
+    if self._stderr_file is not None:
+      self._stderr_file.close()
+      self._stderr_file = None
 
   # ------------------------------------------------------------------
   # Raw JSON-API helpers, independent of google-cloud-storage, so tests
@@ -195,7 +207,7 @@ class FakeGcsServer:
       method="POST",
     )
     try:
-      with urllib.request.urlopen(request):
+      with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS):
         pass
     except urllib.error.HTTPError as e:
       if e.code != 409:  # 409 Conflict: the bucket already exists.
@@ -212,7 +224,7 @@ class FakeGcsServer:
     url = f"{self.host}/storage/v1/b/{bucket_name}/o"
     if prefix:
       url += f"?prefix={urllib.parse.quote(prefix)}"
-    with urllib.request.urlopen(url) as response:
+    with urllib.request.urlopen(url, timeout=_HTTP_TIMEOUT_SECONDS) as response:
       listing = json.load(response)
     return [item["name"] for item in listing.get("items", [])]
 
@@ -223,7 +235,7 @@ class FakeGcsServer:
       f"{urllib.parse.quote(blob_name, safe='')}"
     )
     try:
-      with urllib.request.urlopen(url):
+      with urllib.request.urlopen(url, timeout=_HTTP_TIMEOUT_SECONDS):
         return True
     except urllib.error.HTTPError as e:
       if e.code == 404:
@@ -237,7 +249,9 @@ class FakeGcsServer:
       f"{urllib.parse.quote(blob_name, safe='')}?alt=media"
     )
     try:
-      with urllib.request.urlopen(url) as response:
+      with urllib.request.urlopen(
+        url, timeout=_HTTP_TIMEOUT_SECONDS
+      ) as response:
         return response.read()
     except urllib.error.HTTPError as e:
       if e.code == 404:
@@ -258,7 +272,7 @@ class FakeGcsServer:
       headers={"Content-Type": "application/octet-stream"},
       method="POST",
     )
-    with urllib.request.urlopen(request):
+    with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS):
       pass
 
 
