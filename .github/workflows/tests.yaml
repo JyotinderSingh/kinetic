@@ -66,3 +66,54 @@ jobs:
         with:
           files: coverage.xml
           fail_ci_if_error: false
+
+  docker-roundtrip:
+    # The real runner image (built via kinetic's own Dockerfile
+    # machinery) executed with the exact command line the Job spec
+    # generates, against the GCS emulator — the packager → container →
+    # result contract with no cluster. Python is pinned to 3.12 because
+    # the image base tracks the submitting interpreter's minor version.
+    #
+    # Known flake source: the cold build pulls python:3.12-slim and the
+    # uv image anonymously; shared runner IPs occasionally hit registry
+    # pull limits (429). If that starts biting, add a docker/login-action
+    # step with registry credentials.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        # zizmor: ignore[impostor-commit, mismatched-version-comment]
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+
+      - name: Install dependencies
+        run: uv pip install --system -e ".[test]"
+
+      - name: Install fake-gcs-server
+        env:
+          FAKE_GCS_SERVER_VERSION: "1.55.1"
+          FAKE_GCS_SERVER_SHA256: "048b5cbf33b5a8706dfa71cedb552efca22cb35b6a999e738b2ddfa01383453d"
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/fake-gcs-server.tar.gz" \
+            "https://github.com/fsouza/fake-gcs-server/releases/download/v${FAKE_GCS_SERVER_VERSION}/fake-gcs-server_${FAKE_GCS_SERVER_VERSION}_Linux_amd64.tar.gz"
+          echo "$FAKE_GCS_SERVER_SHA256  $RUNNER_TEMP/fake-gcs-server.tar.gz" | sha256sum -c -
+          tar -C "$RUNNER_TEMP" -xzf "$RUNNER_TEMP/fake-gcs-server.tar.gz" fake-gcs-server
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Run docker roundtrip tests
+        env:
+          # Missing docker/emulator is an error here, not a skip — the
+          # job must never go green as an all-skipped no-op.
+          KINETIC_DOCKER_TIER_REQUIRED: "1"
+        run: >
+          python -m unittest discover
+          -s tests/docker -t .
+          -p "*_test.py"
+          -v
