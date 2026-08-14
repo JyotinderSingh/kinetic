@@ -375,19 +375,22 @@ def _apply_workspace_plan(workspace_dir):
 
   target = workspace_dir
   cwd_rel = plan.get("client_cwd_rel")
-  if isinstance(cwd_rel, str) and cwd_rel:
-    candidate = _workspace_subpath(workspace_dir, cwd_rel)
-    if candidate is not None and os.path.isdir(candidate):
-      target = candidate
-    else:
-      logging.warning(
-        "Client working directory %r is not present in the context; "
-        "using the package root instead.",
-        cwd_rel,
-      )
+  # "" means the client ran from the package root itself: the workspace
+  # root is already the right target. Only non-empty paths need resolving.
+  if isinstance(cwd_rel, str):
+    if cwd_rel:
+      candidate = _workspace_subpath(workspace_dir, cwd_rel)
+      if candidate is not None and os.path.isdir(candidate):
+        target = candidate
+      else:
+        logging.warning(
+          "Client working directory %r is not present in the context; "
+          "using the package root instead.",
+          cwd_rel,
+        )
   elif cwd_rel is not None:
     logging.warning(
-      "Ignoring plan client_cwd_rel %r: expected a non-empty string; "
+      "Ignoring plan client_cwd_rel %r: expected a string; "
       "using the package root instead.",
       cwd_rel,
     )

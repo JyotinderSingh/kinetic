@@ -1389,10 +1389,20 @@ class TestApplyWorkspacePlan(parameterized.TestCase):
     self._assert_cwd(self.workspace / "tools")
     _assert_warned(self, mock_warn, *fragments)
 
+  def test_empty_cwd_rel_chdirs_to_the_root_without_warning(self):
+    self._write_plan({"sys_path_rel": ["", "src"], "client_cwd_rel": ""})
+
+    with mock.patch(
+      "kinetic.runner.remote_runner.logging.warning"
+    ) as mock_warn:
+      _apply_workspace_plan(str(self.workspace))
+
+    self._assert_cwd(self.workspace)
+    mock_warn.assert_not_called()
+
   @parameterized.named_parameters(
     ("an_int", 5, True),
     ("a_list", ["tools"], True),
-    ("an_empty_string", "", True),
     ("an_explicit_null", None, False),
   )
   def test_invalid_client_cwd_rel_is_ignored(self, cwd_rel, warns):
