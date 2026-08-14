@@ -167,12 +167,20 @@ def _failed_worker_pod_names(core_v1, job_name, namespace):
   leader_pod_name = _get_leader_pod_name(job_name)
   try:
     pods = k8s_utils.list_job_pods(core_v1, job_name, namespace)
-  except ApiException:
+  except ApiException as e:
+    logging.warning(
+      "Could not list pods for job %s while scanning for worker "
+      "failures; falling back to leader-only status: %s",
+      job_name,
+      e.reason,
+    )
     return []
   return [
     pod.metadata.name
     for pod in pods
-    if pod.metadata.name != leader_pod_name and pod.status.phase == "Failed"
+    if pod.metadata.name != leader_pod_name
+    and pod.status is not None
+    and pod.status.phase == "Failed"
   ]
 
 

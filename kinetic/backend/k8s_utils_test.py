@@ -479,6 +479,33 @@ class TestCollectPodFailureDetails(absltest.TestCase):
     result = collect_pod_failure_details(mock_core, "job-1", "default")
     self.assertEqual(result, "")
 
+  def test_pod_without_status_is_skipped(self):
+    """A just-(re)created pod with no status yet must not crash collection."""
+    mock_core = MagicMock()
+    fresh_pod = MagicMock()
+    fresh_pod.metadata.name = "fresh-pod"
+    fresh_pod.status = None
+
+    failed_pod = MagicMock()
+    failed_pod.metadata.name = "failed-pod"
+    failed_pod.status.phase = "Failed"
+    cs = MagicMock()
+    cs.name = "kinetic-worker"
+    cs.state.terminated = MagicMock(
+      exit_code=137, reason="OOMKilled", message=None
+    )
+    cs.last_state.terminated = None
+    failed_pod.status.container_statuses = [cs]
+    failed_pod.status.init_container_statuses = None
+
+    mock_core.list_namespaced_pod.return_value.items = [fresh_pod, failed_pod]
+    mock_core.read_namespaced_pod_log.return_value = "error\n"
+
+    result = collect_pod_failure_details(mock_core, "job-1", "default")
+    self.assertIn("failed-pod", result)
+    self.assertIn("exit code 137", result)
+    self.assertNotIn("fresh-pod", result)
+
 
 class TestCheckPodScheduling(parameterized.TestCase):
   def _make_pending_pod(self, message, node_selector=None):

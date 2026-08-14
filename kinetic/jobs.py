@@ -19,7 +19,7 @@ from absl import logging
 from google.api_core import exceptions as google_exceptions
 from kubernetes import client
 
-from kinetic.backend import gke_client, pathways_client
+from kinetic.backend import gke_client, k8s_utils, pathways_client
 from kinetic.backend.log_streaming import LogStreamer
 from kinetic.cli.profiles import resolve_infra
 from kinetic.constants import build_bucket_name
@@ -302,6 +302,39 @@ class JobHandle:
       _attach_note(exception, f"Failed during kinetic phase: {phase}")
     return attach_remote_traceback(exception, result_payload.get("traceback"))
 
+  def _false_success_error(self) -> RuntimeError:
+    """Return the failure for a FAILED job whose payload claims success.
+
+    In multi-host (Pathways) jobs the leader can finish cleanly and
+    upload a success payload even though a worker pod failed, so the
+    computation as a whole cannot be trusted.  Returning the leader's
+    value would silently hide the failure; surface it instead, with pod
+    failure details when they can still be collected.
+    """
+    msg = (
+      f"Job {self.job_id} finished with status FAILED, but its result "
+      "payload claims success. The main process likely uploaded its "
+      "result while another part of the job failed (for multi-host "
+      "jobs, a worker pod), so the result may be incomplete or wrong "
+      "and was not returned. Artifacts were kept for inspection: "
+      f"{self._result_uri()}"
+    )
+    details = ""
+    try:
+      self._ensure_credentials()
+      details = k8s_utils.collect_pod_failure_details(
+        client.CoreV1Api(), self.k8s_name, self.namespace
+      )
+    except Exception as e:
+      logging.warning(
+        "Could not collect pod failure details for job %s: %s",
+        self.job_id,
+        e,
+      )
+    if details:
+      msg += f"\n{details}"
+    return RuntimeError(msg)
+
   def _stream_logs(self) -> None:
     """Stream logs to stdout via LogStreamer (blocking)."""
     self._ensure_credentials()
@@ -418,8 +451,11 @@ class JobHandle:
 
     Raises:
       TimeoutError: If *timeout* is exceeded.
-      RuntimeError: If the job failed without uploading a result, or if
-        the downloaded result payload cannot be deserialized locally.
+      RuntimeError: If the job failed without uploading a result, if
+        the downloaded result payload cannot be deserialized locally,
+        or if a job whose status is FAILED uploaded a success payload
+        (e.g. a multi-host job whose worker pod failed after the
+        leader uploaded its result).
       Exception: Re-raised from the remote function on user failure.
     """
     if cleanup is None:
@@ -482,7 +518,18 @@ class JobHandle:
           f"{self._result_uri()}"
         )
       succeeded = bool(result_payload.get("success"))
-      collected = succeeded and not result_payload.get("serialization_failed")
+      serialization_failed = bool(result_payload.get("serialization_failed"))
+      if (
+        succeeded
+        and not serialization_failed
+        and observed_status == JobStatus.FAILED
+      ):
+        # Never return a value from a job whose observed status is
+        # FAILED, even when the payload claims success (e.g. a Pathways
+        # worker pod failed after the leader uploaded its result).
+        # `collected` stays False so the artifacts are preserved.
+        raise self._false_success_error()
+      collected = succeeded and not serialization_failed
       if collected:
         return result_payload["result"]
       raise self._remote_failure(result_payload)

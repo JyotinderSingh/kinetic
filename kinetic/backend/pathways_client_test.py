@@ -669,6 +669,32 @@ class TestWaitForJob(absltest.TestCase):
     )
     self.assertEqual(wait_for_job("j1"), "success")
 
+  def test_worker_failure_scan_api_error_logs_warning(self):
+    """The leader-only fallback must be visible in the logs, not silent."""
+    self.mock_core.read_namespaced_pod.return_value = self._make_pod(
+      "Succeeded", name="keras-pathways-j1-0"
+    )
+    self.mock_core.list_namespaced_pod.side_effect = ApiException(
+      status=500, reason="Server Error"
+    )
+    with self.assertLogs("absl", level="WARNING") as logs:
+      self.assertEqual(wait_for_job("j1"), "success")
+    self.assertTrue(
+      any("falling back to leader-only status" in m for m in logs.output)
+    )
+
+  def test_worker_pod_without_status_is_skipped(self):
+    """A just-created worker with no status yet must not crash the scan."""
+    self.mock_core.read_namespaced_pod.return_value = self._make_pod(
+      "Succeeded", name="keras-pathways-j1-0"
+    )
+    leader = self._make_pod("Succeeded", name="keras-pathways-j1-0")
+    worker = MagicMock()
+    worker.metadata.name = "keras-pathways-j1-1"
+    worker.status = None
+    self._set_worker_pods(leader, worker)
+    self.assertEqual(wait_for_job("j1"), "success")
+
 
 class TestCleanupJob(absltest.TestCase):
   def setUp(self):
@@ -860,6 +886,33 @@ class TestAsyncObservationHelpers(absltest.TestCase):
     self._set_worker_pods(worker)
 
     self.assertEqual(get_job_status("keras-pathways-job-1"), JobStatus.FAILED)
+
+  def test_get_job_status_worker_scan_api_error_falls_back_to_leader(self):
+    """A pod-listing failure must not turn a Succeeded leader into an error."""
+    self.mock_core.read_namespaced_pod.return_value = self._make_pod(
+      "Succeeded"
+    )
+    self.mock_core.list_namespaced_pod.side_effect = ApiException(
+      status=500, reason="Server Error"
+    )
+
+    self.assertEqual(
+      get_job_status("keras-pathways-job-1"), JobStatus.SUCCEEDED
+    )
+
+  def test_get_job_status_worker_without_status_is_skipped(self):
+    """A worker with no status yet must not crash the failure scan."""
+    self.mock_core.read_namespaced_pod.return_value = self._make_pod(
+      "Succeeded"
+    )
+    worker = MagicMock()
+    worker.metadata.name = "keras-pathways-job-1-1"
+    worker.status = None
+    self._set_worker_pods(worker)
+
+    self.assertEqual(
+      get_job_status("keras-pathways-job-1"), JobStatus.SUCCEEDED
+    )
 
   def test_get_job_status_api_error_raises(self):
     self.mock_core.read_namespaced_pod.side_effect = ApiException(

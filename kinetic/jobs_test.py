@@ -772,6 +772,105 @@ class TestResultFailurePaths(absltest.TestCase):
       k8s=True, gcs=False, cleanup_timeout=180, cleanup_poll_interval=2
     )
 
+  def test_failed_status_with_success_payload_raises_and_keeps_artifacts(self):
+    """Follow-up to #239/#240: a FAILED job must never return a value.
+
+    A Pathways worker pod can fail after the leader uploaded a success
+    payload; returning the leader's value would silently hide the
+    failure and delete the evidence.
+    """
+    handle = self._make_handle()
+
+    with (
+      mock.patch.object(handle, "status", return_value=JobStatus.FAILED),
+      mock.patch.object(
+        handle,
+        "_download_result_payload_with_backoff",
+        return_value={"success": True, "result": 42},
+      ),
+      mock.patch("kinetic.jobs.ensure_credentials"),
+      mock.patch(
+        "kinetic.jobs.k8s_utils.collect_pod_failure_details",
+        return_value="  worker-1: exit code 137",
+      ) as mock_details,
+      mock.patch("kinetic.jobs.client.CoreV1Api") as mock_core_api,
+      mock.patch.object(handle, "cleanup") as mock_cleanup,
+      self.assertRaises(RuntimeError) as raised,
+    ):
+      handle.result()
+
+    message = str(raised.exception)
+    self.assertIn("status FAILED", message)
+    self.assertIn("claims success", message)
+    self.assertIn("gs://proj-kn-cluster-jobs/job-a1b2/result.pkl", message)
+    self.assertIn("worker-1: exit code 137", message)
+    mock_details.assert_called_once_with(
+      mock_core_api.return_value, "kinetic-job-a1b2", "default"
+    )
+    mock_cleanup.assert_called_once_with(
+      k8s=True, gcs=False, cleanup_timeout=180, cleanup_poll_interval=2
+    )
+
+  def test_failed_status_success_payload_detail_errors_do_not_mask(self):
+    """Pod-detail collection failures must not mask the real error."""
+    handle = self._make_handle()
+
+    with (
+      mock.patch.object(handle, "status", return_value=JobStatus.FAILED),
+      mock.patch.object(
+        handle,
+        "_download_result_payload_with_backoff",
+        return_value={"success": True, "result": 42},
+      ),
+      mock.patch("kinetic.jobs.ensure_credentials"),
+      mock.patch(
+        "kinetic.jobs.client.CoreV1Api",
+        side_effect=RuntimeError("no kube config"),
+      ),
+      mock.patch.object(handle, "cleanup") as mock_cleanup,
+      self.assertRaisesRegex(RuntimeError, "claims success"),
+      self.assertLogs("absl", level="WARNING") as logs,
+    ):
+      handle.result()
+
+    self.assertTrue(
+      any("Could not collect pod failure details" in m for m in logs.output)
+    )
+    mock_cleanup.assert_called_once_with(
+      k8s=True, gcs=False, cleanup_timeout=180, cleanup_poll_interval=2
+    )
+
+  def test_failed_status_with_serialization_failed_keeps_remote_detail(self):
+    """serialization_failed payloads carry the remote exception — the
+    status/payload-mismatch guard must not swallow that richer error."""
+    handle = self._make_handle()
+    remote_error = RuntimeError("Result serialization failed: nope")
+
+    with (
+      mock.patch.object(handle, "status", return_value=JobStatus.FAILED),
+      mock.patch.object(
+        handle,
+        "_download_result_payload_with_backoff",
+        return_value={
+          "success": True,
+          "result": None,
+          "exception": remote_error,
+          "serialization_failed": True,
+          "result_repr": "<Model object at 0x7f00>",
+        },
+      ),
+      mock.patch.object(handle, "cleanup") as mock_cleanup,
+      self.assertRaises(RuntimeError) as raised,
+    ):
+      handle.result()
+
+    self.assertIn(
+      "<Model object at 0x7f00>", "\n".join(raised.exception.__notes__)
+    )
+    mock_cleanup.assert_called_once_with(
+      k8s=True, gcs=False, cleanup_timeout=180, cleanup_poll_interval=2
+    )
+
   def test_remote_failure_keeps_gcs_artifacts(self):
     handle = self._make_handle()
 
