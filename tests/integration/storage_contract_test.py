@@ -17,6 +17,8 @@ from unittest import mock
 import cloudpickle
 from absl.testing import absltest
 from google.cloud import exceptions as cloud_exceptions
+from google.cloud.storage import Client as GcsClient
+from google.cloud.storage import transfer_manager
 
 from kinetic import jobs
 from kinetic.constants import build_bucket_name
@@ -111,6 +113,27 @@ class TestDownloadResult(FakeGcsTestCase):
 
     with self.assertRaises(cloud_exceptions.NotFound):
       storage.download_result(bucket, "job-none", project=self.PROJECT)
+
+  def test_download_does_not_follow_a_planted_symlink(self):
+    """mkstemp must create a fresh file, never write through a symlink."""
+    bucket = self.make_bucket()
+    self.server.write_blob(bucket, "job-exploit/result.pkl", b"attack payload")
+    tmp_dir = _make_temp_path(self)
+    victim = tmp_dir / "victim.txt"
+    victim.write_text("sensitive data")
+    # Plant a symlink at the path a predictable naming scheme would use.
+    os.symlink(victim, tmp_dir / "result-job-exploit.pkl")
+
+    with mock.patch(
+      "kinetic.utils.storage.tempfile.gettempdir", return_value=str(tmp_dir)
+    ):
+      local_path = storage.download_result(
+        bucket, "job-exploit", project=self.PROJECT
+      )
+    self.addCleanup(os.remove, local_path)
+
+    self.assertEqual(victim.read_text(), "sensitive data")
+    self.assertEqual(pathlib.Path(local_path).read_bytes(), b"attack payload")
 
 
 class TestHandleRoundtrip(FakeGcsTestCase):
@@ -264,6 +287,62 @@ class TestUploadDataCache(FakeGcsTestCase):
         bucket, f"team-a/data-markers/{data.content_hash()}"
       )
     )
+
+
+class TestUploadDirectory(FakeGcsTestCase):
+  """_upload_directory's transfer_manager contract, spied but real."""
+
+  def setUp(self):
+    super().setUp()
+    # A spy, not a stub: the real transfer_manager still runs against
+    # the emulator; the wrapper only records the call contract.
+    self.spy_upload = self.enterContext(
+      mock.patch(
+        "kinetic.utils.storage.transfer_manager.upload_many_from_filenames",
+        wraps=transfer_manager.upload_many_from_filenames,
+      )
+    )
+
+  def _real_bucket(self, bucket_name):
+    return GcsClient(project=self.PROJECT).bucket(bucket_name)
+
+  def test_preserves_structure_and_raises_on_failures(self):
+    bucket_name = self.make_bucket()
+    local_dir = _make_temp_path(self) / "dataset"
+    (local_dir / "sub").mkdir(parents=True)
+    (local_dir / "a.csv").write_text("a")
+    (local_dir / "sub" / "b.csv").write_text("b")
+
+    storage._upload_directory(
+      self._real_bucket(bucket_name), str(local_dir), "prefix/hash"
+    )
+
+    self.assertEqual(
+      sorted(self.server.list_blob_names(bucket_name, "prefix/hash/")),
+      ["prefix/hash/a.csv", "prefix/hash/sub/b.csv"],
+    )
+    self.assertEqual(
+      sorted(self.spy_upload.call_args[0][1]), ["a.csv", "sub/b.csv"]
+    )
+    kwargs = self.spy_upload.call_args.kwargs
+    self.assertEqual(kwargs["source_directory"], str(local_dir))
+    self.assertEqual(kwargs["blob_name_prefix"], "prefix/hash/")
+    # A failed file must raise, not come back in a results list — the
+    # emulator's uploads all succeed, so only this assertion guards
+    # against silently partial data uploads.
+    self.assertTrue(kwargs["raise_exception"])
+
+  def test_empty_directory_is_noop(self):
+    bucket_name = self.make_bucket()
+    local_dir = _make_temp_path(self) / "empty_dataset"
+    local_dir.mkdir()
+
+    storage._upload_directory(
+      self._real_bucket(bucket_name), str(local_dir), "prefix/hash"
+    )
+
+    self.spy_upload.assert_not_called()
+    self.assertEqual(self.server.list_blob_names(bucket_name), [])
 
 
 class TestJobHandleResultBackoff(FakeGcsTestCase):
