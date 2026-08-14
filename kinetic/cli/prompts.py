@@ -137,9 +137,12 @@ def _link_billing_account(project_id):
       "billing",
       "projects",
       "link",
+      # Flags must precede the -- delimiter: gcloud stops parsing options at
+      # --, so a trailing --billing-account is read as a positional and the
+      # command fails with "unrecognized arguments".
+      f"--billing-account={account_id}",
       "--",
       project_id,
-      f"--billing-account={account_id}",
     ],
     capture_output=True,
     text=True,
