@@ -199,7 +199,7 @@ def derive_docker_command(
   # Desktop (macOS/Windows) resolves it natively and ignores nothing —
   # the flag is accepted everywhere.
   command.append(f"--add-host={_DOCKER_HOST_ALIAS}:host-gateway")
-  for env in container.env:
+  for env in container.env or []:
     command.extend(["-e", f"{env.name}={env.value}"])
   # The one deviation from the manifest: point the runner's storage
   # client at the emulator instead of Workload Identity + real GCS.

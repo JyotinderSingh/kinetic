@@ -100,7 +100,7 @@ def _six_version():
 @dataclasses.dataclass
 class _SubmitOutcome:
   proc: subprocess.CompletedProcess
-  result: dict | None
+  result: dict
   job_id: str
   bucket: str
 
@@ -182,11 +182,22 @@ class TestDockerRunnerRoundtrip(DockerTierTestCase):
     )
 
     result_bytes = self.server.read_blob(bucket, f"{job_id}/result.pkl")
-    result = (
-      cloudpickle.loads(result_bytes) if result_bytes is not None else None
-    )
+    if result_bytes is None:
+      # Every runner phase — even pre-execution failures — uploads a
+      # result payload; its absence means the container died before the
+      # runner could report. Surface the container's own output instead
+      # of letting assertions crash on a None result.
+      raise RuntimeError(
+        f"Container exited without writing result.pkl.\n"
+        f"Exit code: {proc.returncode}\n"
+        f"Stderr:\n{proc.stderr}\n"
+        f"Stdout:\n{proc.stdout}"
+      )
     return _SubmitOutcome(
-      proc=proc, result=result, job_id=job_id, bucket=bucket
+      proc=proc,
+      result=cloudpickle.loads(result_bytes),
+      job_id=job_id,
+      bucket=bucket,
     )
 
   # ------------------------------------------------------------------
