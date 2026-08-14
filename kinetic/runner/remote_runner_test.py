@@ -1,4 +1,9 @@
-"""Tests for kinetic.runner.remote_runner — helpers and execution."""
+"""Tests for kinetic.runner.remote_runner — helpers and execution.
+
+Cloud Storage transport is exercised for real against a fake-gcs-server
+emulator (see ``kinetic.utils.fake_gcs_fixture``); the remaining patches
+are fault injection and instrumentation, never transport replacement.
+"""
 
 import collections
 import contextlib
@@ -7,8 +12,8 @@ import json
 import os
 import pathlib
 import pickle
-import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -19,9 +24,12 @@ from unittest.mock import MagicMock
 
 import cloudpickle
 from absl.testing import absltest, parameterized
+from google.cloud import exceptions as cloud_exceptions
+from google.cloud import storage
+from google.cloud.storage import transfer_manager
 
+from kinetic.runner import remote_runner
 from kinetic.runner.remote_runner import (
-  _DOWNLOAD_BATCH_SIZE,
   _ZIP_CREATE_SYSTEM_UNIX,
   _apply_workspace_plan,
   _contains_data_ref,
@@ -41,6 +49,11 @@ from kinetic.runner.remote_runner import (
   resolve_data_refs,
   resolve_volumes,
 )
+from kinetic.utils.fake_gcs_fixture import (
+  TEST_PROJECT,
+  clear_kinetic_client_cache,
+  shared_server,
+)
 
 # Mounted ref: resolves to its mount path without touching GCS.
 _MOUNTED_REF = {
@@ -49,14 +62,6 @@ _MOUNTED_REF = {
   "is_dir": True,
   "mount_path": "/mnt/data",
 }
-
-# The three artifact URIs every run needs.
-_DEFAULT_ARGV = [
-  "remote_runner.py",
-  "gs://bucket/context.zip",
-  "gs://bucket/payload.pkl",
-  "gs://bucket/result.pkl",
-]
 
 # Point/OneField use collections.namedtuple on purpose: the typing.NamedTuple
 # flavor (TypedPoint below) is rebuilt through a different code path, so both
@@ -144,41 +149,35 @@ def _defaultdict_with_ref():
   return mapping
 
 
-def _fake_blob(name):
-  """A blob double that reports *name*."""
-  blob = MagicMock()
-  blob.name = name
-  return blob
+class _EmulatorTestCase(parameterized.TestCase):
+  """Base for tests that talk to the shared fake-gcs-server."""
 
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
+    # Raises SkipTest when the fake-gcs-server binary is unavailable.
+    cls.server = shared_server()
 
-def _fake_storage_client(blob_names=()):
-  """A ``storage.Client`` double whose bucket lists *blob_names*."""
-  client = MagicMock()
-  client.bucket.return_value.list_blobs.return_value = [
-    _fake_blob(name) for name in blob_names
-  ]
-  return client
+  def setUp(self):
+    super().setUp()
+    # Other test modules patch storage.Client and can leave a stale mock
+    # in kinetic's per-project client cache; drop it before every test
+    # (per-test, because xdist can interleave foreign tests between two
+    # methods of one class).
+    clear_kinetic_client_cache()
 
+  def real_client(self):
+    """A real google-cloud-storage client aimed at the emulator."""
+    return storage.Client(project=TEST_PROJECT)
 
-def _patch_download_data(create_file=None):
-  """Patch ``_download_data`` to only create its target directory.
-
-  Args:
-      create_file: Optional file name to also create inside the target,
-          for the single-file resolution path.
-
-  Returns:
-      An unstarted ``mock.patch`` object.
-  """
-
-  def fake_download(ref, target_dir, client):
-    os.makedirs(target_dir, exist_ok=True)
-    if create_file:
-      pathlib.Path(target_dir, create_file).write_text("{}")
-
-  return mock.patch(
-    "kinetic.runner.remote_runner._download_data", side_effect=fake_download
-  )
+  def seeded_data_bucket(self, blob_names, content=b"data"):
+    """A fresh bucket holding *blob_names* (directory markers stay empty)."""
+    bucket = self.server.make_bucket(suffix="data")
+    for name in blob_names:
+      self.server.write_blob(
+        bucket, name, b"" if name.endswith("/") else content
+      )
+    return bucket
 
 
 def _rendered_warnings(mock_warning):
@@ -270,6 +269,27 @@ def _ghost_payload(test_case, fingerprint):
     sys.modules.pop("kinetic_ghost_mod", None)
 
 
+class _SeededArtifacts(typing.NamedTuple):
+  """Emulator URIs and local source paths for one runner invocation."""
+
+  bucket: str
+  context_uri: str
+  payload_uri: str
+  result_uri: str
+  context_path: str
+  payload_path: str
+
+  @property
+  def default_argv(self):
+    """The legacy positional argument vector for these artifacts."""
+    return [
+      "remote_runner.py",
+      self.context_uri,
+      self.payload_uri,
+      self.result_uri,
+    ]
+
+
 def _run_runner(
   test_case,
   payload=None,
@@ -278,10 +298,13 @@ def _run_runner(
   plan_json=None,
   context_bytes=None,
   argv=None,
-  storage_client=None,
   patches=(),
 ):
-  """Run ``main()`` against fake GCS artifacts.
+  """Run ``main()`` against artifacts seeded into the real emulator.
+
+  The context and payload are uploaded to a fresh fake-gcs-server
+  bucket, ``main()`` downloads and uploads through its real storage
+  client, and the result is read back from the emulator.
 
   Args:
       test_case: The running test, used for temp dirs and cleanups.
@@ -290,14 +313,15 @@ def _run_runner(
       zip_entries: ``{archive path: text}`` for the context archive.
       plan_json: Optional ``.kinetic/plan.json`` content.
       context_bytes: Raw bytes to use as ``context.zip`` instead.
-      argv: Argument vector, or a callable taking the local
-          ``(context.zip, payload.pkl)`` paths and returning one.
-      storage_client: Object ``storage.Client()`` should return.
+      argv: Argument vector, or a callable taking a ``_SeededArtifacts``
+          and returning one.
       patches: Extra unstarted patches entered around ``main()``.
 
   Returns:
-      ``(exit_code, result_payload_or_None)``.
+      ``(exit_code, result_payload_or_None)`` — the result unpickled
+      from the emulator, or None when no result was uploaded.
   """
+  server = shared_server()
   tmp_path = _make_temp_path(test_case)
   test_case.addCleanup(setattr, sys, "path", sys.path[:])
   test_case.addCleanup(os.chdir, os.getcwd())
@@ -315,53 +339,44 @@ def _run_runner(
     with open(payload_pkl, "wb") as f:
       cloudpickle.dump(payload, f)
 
-  if argv is None:
-    argv = _DEFAULT_ARGV
-  elif callable(argv):
-    argv = argv(str(context_zip), str(payload_pkl))
+  bucket = server.make_bucket(suffix="runner")
+  server.write_blob(bucket, "job/context.zip", context_zip.read_bytes())
+  server.write_blob(bucket, "job/payload.pkl", payload_pkl.read_bytes())
+  artifacts = _SeededArtifacts(
+    bucket=bucket,
+    context_uri=f"gs://{bucket}/job/context.zip",
+    payload_uri=f"gs://{bucket}/job/payload.pkl",
+    result_uri=f"gs://{bucket}/job/result.pkl",
+    context_path=str(context_zip),
+    payload_path=str(payload_pkl),
+  )
 
-  def fake_download(client, gcs_path, local_path):
-    if "context.zip" in gcs_path:
-      shutil.copy(str(context_zip), local_path)
-    elif "payload.pkl" in gcs_path:
-      shutil.copy(str(payload_pkl), local_path)
+  if argv is None:
+    argv = artifacts.default_argv
+  elif callable(argv):
+    argv = argv(artifacts)
 
   with contextlib.ExitStack() as stack:
     stack.enter_context(mock.patch("sys.argv", argv))
-    stack.enter_context(
-      mock.patch(
-        "kinetic.runner.remote_runner._download_from_gcs",
-        side_effect=fake_download,
-      )
-    )
-    mock_upload = stack.enter_context(
-      mock.patch("kinetic.runner.remote_runner._upload_to_gcs")
-    )
-    stack.enter_context(
-      mock.patch(
-        "kinetic.runner.remote_runner.storage.Client",
-        return_value=MagicMock() if storage_client is None else storage_client,
-      )
-    )
     for patch in patches:
       stack.enter_context(patch)
 
     with test_case.assertRaises(SystemExit) as cm:
       main()
 
-    result_payload = None
-    if mock_upload.call_args is not None:
-      with open(mock_upload.call_args[0][1], "rb") as f:
-        result_payload = cloudpickle.load(f)
+  result_payload = None
+  result_bytes = server.read_blob(bucket, "job/result.pkl")
+  if result_bytes is not None:
+    result_payload = cloudpickle.loads(result_bytes)
 
   return cm.exception.code, result_payload
 
 
-class _RunnerTestCase(parameterized.TestCase):
+class _RunnerTestCase(_EmulatorTestCase):
   """Base class for tests that drive ``main()`` end to end."""
 
   def run_runner(self, **kwargs):
-    """Run ``main()`` against fake artifacts; see ``_run_runner``."""
+    """Run ``main()`` against seeded emulator artifacts; see ``_run_runner``."""
     return _run_runner(self, **kwargs)
 
 
@@ -391,56 +406,56 @@ def _exit_with_code(code):
   sys.exit(code)
 
 
-class TestDownloadFromGcs(parameterized.TestCase):
+class TestDownloadFromGcs(_EmulatorTestCase):
   @parameterized.named_parameters(
-    (
-      "simple",
-      "gs://my-bucket/path/to/file.pkl",
-      "my-bucket",
-      "path/to/file.pkl",
-    ),
-    (
-      "nested",
-      "gs://bucket/a/b/c/deep/file.zip",
-      "bucket",
-      "a/b/c/deep/file.zip",
-    ),
+    ("simple", "path/to/file.pkl"),
+    ("nested", "a/b/c/deep/file.zip"),
   )
-  def test_parses_gcs_path(self, uri, bucket_name, blob_path):
-    client = _fake_storage_client()
+  def test_downloads_the_addressed_blob(self, blob_path):
+    bucket = self.server.make_bucket()
+    self.server.write_blob(bucket, blob_path, b"artifact bytes")
+    local = _make_temp_path(self) / "local.bin"
 
-    _download_from_gcs(client, uri, "/tmp/local.pkl")
-
-    client.bucket.assert_called_once_with(bucket_name)
-    bucket = client.bucket.return_value
-    bucket.blob.assert_called_once_with(blob_path)
-    bucket.blob.return_value.download_to_filename.assert_called_once_with(
-      "/tmp/local.pkl"
+    _download_from_gcs(
+      self.real_client(), f"gs://{bucket}/{blob_path}", str(local)
     )
 
+    self.assertEqual(local.read_bytes(), b"artifact bytes")
 
-class TestUploadToGcs(absltest.TestCase):
-  def test_parses_gcs_path(self):
-    client = _fake_storage_client()
+  def test_missing_blob_raises_not_found(self):
+    bucket = self.server.make_bucket()
+    local = _make_temp_path(self) / "local.bin"
+
+    with self.assertRaises(cloud_exceptions.NotFound):
+      _download_from_gcs(
+        self.real_client(), f"gs://{bucket}/absent.pkl", str(local)
+      )
+
+
+class TestUploadToGcs(_EmulatorTestCase):
+  def test_uploads_to_the_addressed_blob(self):
+    bucket = self.server.make_bucket()
+    local = _make_temp_path(self) / "result.pkl"
+    local.write_bytes(b"result bytes")
 
     _upload_to_gcs(
-      client, "/tmp/result.pkl", "gs://my-bucket/results/result.pkl"
+      self.real_client(), str(local), f"gs://{bucket}/results/result.pkl"
     )
 
-    client.bucket.assert_called_once_with("my-bucket")
-    bucket = client.bucket.return_value
-    bucket.blob.assert_called_once_with("results/result.pkl")
-    bucket.blob.return_value.upload_from_filename.assert_called_once_with(
-      "/tmp/result.pkl"
+    self.assertEqual(
+      self.server.read_blob(bucket, "results/result.pkl"), b"result bytes"
     )
 
 
-class TestDownloadData(parameterized.TestCase):
+class TestDownloadData(_EmulatorTestCase):
   def setUp(self):
     super().setUp()
-    self.mock_download = self.enterContext(
+    # A spy, not a stub: the real transfer_manager still runs against
+    # the emulator; the wrapper only records the batching contract.
+    self.spy_download = self.enterContext(
       mock.patch(
         "kinetic.runner.remote_runner.transfer_manager.download_many_to_path",
+        wraps=transfer_manager.download_many_to_path,
       )
     )
 
@@ -453,44 +468,60 @@ class TestDownloadData(parameterized.TestCase):
     ("keeps_subdirectories", ["prefix/hash/sub/deep.csv"], ["sub/deep.csv"]),
   )
   def test_downloads_relative_blob_names(self, blob_names, expected):
+    bucket = self.seeded_data_bucket(blob_names)
     target = str(_make_temp_path(self) / "output")
 
     _download_data(
-      _data_ref("gs://bucket/prefix/hash"),
+      _data_ref(f"gs://{bucket}/prefix/hash"),
       target,
-      _fake_storage_client(blob_names),
+      self.real_client(),
     )
 
-    self.mock_download.assert_called_once()
-    self.assertEqual(self.mock_download.call_args[0][1], expected)
-    kwargs = self.mock_download.call_args.kwargs
+    self.spy_download.assert_called_once()
+    self.assertEqual(self.spy_download.call_args[0][1], expected)
+    kwargs = self.spy_download.call_args.kwargs
     self.assertEqual(kwargs["destination_directory"], target)
     self.assertEqual(kwargs["blob_name_prefix"], "prefix/hash/")
+    # A failed blob must raise, not come back in the results list — the
+    # emulator's downloads all succeed, so only this assertion guards
+    # against partially downloaded data reaching the user function.
     self.assertTrue(kwargs["raise_exception"])
+    for rel_path in expected:
+      downloaded = pathlib.Path(target, rel_path)
+      self.assertEqual(downloaded.read_bytes(), b"data")
 
   def test_large_listing_downloads_in_batches(self):
-    target = str(_make_temp_path(self) / "output")
-    num_blobs = _DOWNLOAD_BATCH_SIZE + 5
-    client = _fake_storage_client(
+    batch_size = 5
+    num_blobs = batch_size + 2
+    bucket = self.seeded_data_bucket(
       [f"prefix/hash/file_{i}.csv" for i in range(num_blobs)]
     )
+    target = str(_make_temp_path(self) / "output")
 
-    _download_data(_data_ref("gs://bucket/prefix/hash"), target, client)
+    with mock.patch(
+      "kinetic.runner.remote_runner._DOWNLOAD_BATCH_SIZE", batch_size
+    ):
+      _download_data(
+        _data_ref(f"gs://{bucket}/prefix/hash"), target, self.real_client()
+      )
 
-    self.assertEqual(self.mock_download.call_count, 2)
-    first_batch = self.mock_download.call_args_list[0][0][1]
-    second_batch = self.mock_download.call_args_list[1][0][1]
-    self.assertEqual(len(first_batch), _DOWNLOAD_BATCH_SIZE)
-    self.assertEqual(len(second_batch), 5)
+    self.assertEqual(self.spy_download.call_count, 2)
+    first_batch = self.spy_download.call_args_list[0][0][1]
+    second_batch = self.spy_download.call_args_list[1][0][1]
+    self.assertEqual(len(first_batch), batch_size)
+    self.assertEqual(len(second_batch), 2)
+    for i in range(num_blobs):
+      self.assertTrue(pathlib.Path(target, f"file_{i}.csv").exists())
 
   def test_empty_listing_is_noop(self):
+    bucket = self.server.make_bucket()
     target = str(_make_temp_path(self) / "output")
 
     _download_data(
-      _data_ref("gs://bucket/prefix/hash"), target, _fake_storage_client()
+      _data_ref(f"gs://{bucket}/prefix/hash"), target, self.real_client()
     )
 
-    self.mock_download.assert_not_called()
+    self.spy_download.assert_not_called()
 
 
 class TestDownloadHfData(parameterized.TestCase):
@@ -513,27 +544,40 @@ class TestDownloadHfData(parameterized.TestCase):
     self.assertEqual(kwargs["trust_remote_code"], trust)
 
 
-class TestResolveDataRefs(absltest.TestCase):
+class TestResolveDataRefs(_EmulatorTestCase):
+  # Mounted and fuse refs never touch GCS, so those cases pass
+  # ``client=None`` to prove it; download cases get a real client and a
+  # seeded emulator bucket.
+
+  def _seeded_ref(self, blob_names, **ref_kwargs):
+    """A data ref addressing a fresh bucket seeded with *blob_names*."""
+    bucket = self.seeded_data_bucket(blob_names)
+    prefix = blob_names[0].rsplit("/", 1)[0]
+    return _data_ref(f"gs://{bucket}/{prefix}", **ref_kwargs)
+
   def test_replaces_ref_with_path(self):
     tmp = _make_temp_path(self)
+    ref = self._seeded_ref(["cache/hash/part.txt"], mount_path=None)
 
     args, _ = resolve_data_refs(
-      (_data_ref(mount_path=None), 42),
+      (ref, 42),
       {},
-      _fake_storage_client(),
+      self.real_client(),
       str(tmp / "data"),
     )
 
     self.assertIsInstance(args[0], str)
+    self.assertEqual(pathlib.Path(args[0], "part.txt").read_bytes(), b"data")
     self.assertEqual(args[1], 42)
 
   def test_nested_refs_in_list(self):
     tmp = _make_temp_path(self)
+    ref = self._seeded_ref(["cache/hash/part.txt"], mount_path=None)
 
     args, _ = resolve_data_refs(
-      ([_data_ref(mount_path=None), "other"],),
+      ([ref, "other"],),
       {},
-      _fake_storage_client(),
+      self.real_client(),
       str(tmp / "data"),
     )
 
@@ -542,11 +586,12 @@ class TestResolveDataRefs(absltest.TestCase):
 
   def test_kwargs_refs_resolved(self):
     tmp = _make_temp_path(self)
+    ref = self._seeded_ref(["cache/hash/part.txt"], mount_path=None)
 
     _, kwargs = resolve_data_refs(
       (),
-      {"data": _data_ref(mount_path=None), "lr": 0.01},
-      _fake_storage_client(),
+      {"data": ref, "lr": 0.01},
+      self.real_client(),
       str(tmp / "data"),
     )
 
@@ -555,31 +600,36 @@ class TestResolveDataRefs(absltest.TestCase):
 
   def test_single_file_returns_file_path(self):
     tmp = _make_temp_path(self)
-    ref = _data_ref("gs://b/prefix/hash", is_dir=False, mount_path=None)
+    ref = self._seeded_ref(
+      ["prefix/hash/config.json"], is_dir=False, mount_path=None
+    )
 
-    with _patch_download_data(create_file="config.json"):
-      args, _ = resolve_data_refs((ref,), {}, MagicMock(), str(tmp / "data"))
+    args, _ = resolve_data_refs(
+      (ref,), {}, self.real_client(), str(tmp / "data")
+    )
 
     self.assertTrue(args[0].endswith("config.json"))
 
   def test_duplicate_uri_downloaded_once(self):
     tmp = _make_temp_path(self)
-    ref = _data_ref("gs://b/cache/hash", mount_path=None)
+    ref = self._seeded_ref(["cache/hash/part.txt"], mount_path=None)
 
-    with _patch_download_data() as mock_dl:
+    with mock.patch(
+      "kinetic.runner.remote_runner._download_data", wraps=_download_data
+    ) as spy_dl:
       args, kwargs = resolve_data_refs(
-        (ref, ref), {"d": ref}, MagicMock(), str(tmp / "data")
+        (ref, ref), {"d": ref}, self.real_client(), str(tmp / "data")
       )
 
     # Downloaded only once despite three references
-    mock_dl.assert_called_once()
+    spy_dl.assert_called_once()
     # All resolved paths point to the same directory
     self.assertEqual(args[0], args[1])
     self.assertEqual(args[0], kwargs["d"])
 
   def test_non_ref_dict_preserved(self):
     args, kwargs = resolve_data_refs(
-      ({"key": "value"},), {"x": 1}, MagicMock(), "/tmp/data"
+      ({"key": "value"},), {"x": 1}, None, "/tmp/data"
     )
 
     self.assertEqual(args[0], {"key": "value"})
@@ -597,7 +647,7 @@ class TestResolveDataRefs(absltest.TestCase):
       fuse=True,
     )
 
-    args, _ = resolve_data_refs((ref,), {}, MagicMock(), "/tmp/data")
+    args, _ = resolve_data_refs((ref,), {}, None, "/tmp/data")
 
     self.assertTrue(args[0].endswith("config.json"))
     self.assertFalse(os.path.isdir(args[0]))
@@ -608,7 +658,7 @@ class TestResolveDataRefs(absltest.TestCase):
       "gs://b/data/train/", mount_path="/tmp/fuse-data/0", fuse=True
     )
 
-    args, _ = resolve_data_refs((ref,), {}, MagicMock(), "/tmp/data")
+    args, _ = resolve_data_refs((ref,), {}, None, "/tmp/data")
 
     self.assertEqual(args[0], "/tmp/fuse-data/0")
 
@@ -618,12 +668,12 @@ class TestResolveDataRefs(absltest.TestCase):
       "gs://b/cache/hash", is_dir=False, mount_path="/data/config"
     )
 
-    args, _ = resolve_data_refs((ref,), {}, MagicMock(), "/tmp/data")
+    args, _ = resolve_data_refs((ref,), {}, None, "/tmp/data")
 
     self.assertEqual(args[0], "/data/config")
 
 
-class TestResolveVolumes(parameterized.TestCase):
+class TestResolveVolumes(_EmulatorTestCase):
   @parameterized.named_parameters(
     ("single_volume", ["data"], []),
     ("multiple_volumes", ["data1", "data2"], []),
@@ -633,30 +683,35 @@ class TestResolveVolumes(parameterized.TestCase):
     self, downloaded, fuse_mounts
   ):
     tmp = _make_temp_path(self)
+    bucket = self.seeded_data_bucket(
+      [f"{name}/part.txt" for name in downloaded]
+    )
     # No "fuse" key at all: the old ref format still downloads.
     refs = [
-      _data_ref(f"gs://b/{name}", mount_path=str(tmp / name))
+      _data_ref(f"gs://{bucket}/{name}", mount_path=str(tmp / name))
       for name in downloaded
     ]
     refs += [
-      _data_ref(f"gs://b/fuse/{i}", mount_path=path, fuse=True)
+      _data_ref(f"gs://{bucket}/fuse/{i}", mount_path=path, fuse=True)
       for i, path in enumerate(fuse_mounts)
     ]
 
-    resolve_volumes(refs, _fake_storage_client())
+    resolve_volumes(refs, self.real_client())
 
     for name in downloaded:
-      self.assertTrue(os.path.isdir(str(tmp / name)))
+      self.assertEqual((tmp / name / "part.txt").read_bytes(), b"data")
     for path in fuse_mounts:
       self.assertFalse(os.path.exists(path))
 
   def test_fuse_volume_skips_download(self):
     refs = [_data_ref("gs://b/data/", mount_path="/data", fuse=True)]
 
-    with mock.patch("kinetic.runner.remote_runner._download_data") as mock_dl:
-      resolve_volumes(refs, MagicMock())
+    with mock.patch(
+      "kinetic.runner.remote_runner._download_data", wraps=_download_data
+    ) as spy_dl:
+      resolve_volumes(refs, None)
 
-    mock_dl.assert_not_called()
+    spy_dl.assert_not_called()
 
 
 class TestMain(_RunnerTestCase):
@@ -706,13 +761,14 @@ class TestMain(_RunnerTestCase):
       assert isinstance(data_path, str), f"Expected str, got {type(data_path)}"
       return "resolved"
 
-    with _patch_download_data():
-      exit_code, result = self.run_runner(
-        payload=_basic_payload(
-          check_is_string,
-          args=(_data_ref("gs://b/cache/hash", mount_path=None),),
-        )
+    bucket = self.seeded_data_bucket(["cache/hash/part.txt"])
+
+    exit_code, result = self.run_runner(
+      payload=_basic_payload(
+        check_is_string,
+        args=(_data_ref(f"gs://{bucket}/cache/hash", mount_path=None),),
       )
+    )
 
     self.assertEqual(exit_code, 0)
     self.assertEqual(result["result"], "resolved")
@@ -727,14 +783,15 @@ class TestMain(_RunnerTestCase):
       )
       return "mounted"
 
-    with _patch_download_data():
-      exit_code, result = self.run_runner(
-        payload=_basic_payload(
-          check_mount,
-          args=(mount_path,),
-          volumes=[_data_ref("gs://b/cache/hash", mount_path=mount_path)],
-        )
+    bucket = self.seeded_data_bucket(["cache/hash/part.txt"])
+
+    exit_code, result = self.run_runner(
+      payload=_basic_payload(
+        check_mount,
+        args=(mount_path,),
+        volumes=[_data_ref(f"gs://{bucket}/cache/hash", mount_path=mount_path)],
       )
+    )
 
     self.assertEqual(exit_code, 0)
     self.assertEqual(result["result"], "mounted")
@@ -760,37 +817,27 @@ class TestMain(_RunnerTestCase):
     self.assertIn("UnpicklableError", result["traceback"])
 
 
-class TestInstallRequirements(absltest.TestCase):
+class TestInstallRequirements(_EmulatorTestCase):
   @contextlib.contextmanager
-  def _patched_install(self, contents, returncode=0, stderr=""):
-    """Fake the requirements download and the ``uv pip install`` call.
+  def _seeded_install(self, contents, returncode=0, stderr=""):
+    """Seed a real requirements blob and fake only ``uv pip install``.
 
-    Yields ``(temp_dir, mock_subprocess_run)``.
+    Yields ``(temp_dir, requirements_uri, mock_subprocess_run)``.
     """
     tmp = _make_temp_path(self)
-    req_path = tmp / "requirements.txt"
-    req_path.write_text(contents)
+    bucket = self.server.make_bucket(suffix="reqs")
+    self.server.write_blob(bucket, "requirements.txt", contents)
+    uri = f"gs://{bucket}/requirements.txt"
 
-    def fake_download(client, gcs_path, local_path):
-      shutil.copy(str(req_path), local_path)
-
-    with (
-      mock.patch(
-        "kinetic.runner.remote_runner._download_from_gcs",
-        side_effect=fake_download,
-      ),
-      mock.patch("kinetic.runner.remote_runner.subprocess.run") as mock_run,
-    ):
+    with mock.patch("kinetic.runner.remote_runner.subprocess.run") as mock_run:
       mock_run.return_value = MagicMock(
         returncode=returncode, stderr=stderr, stdout=""
       )
-      yield str(tmp), mock_run
+      yield str(tmp), uri, mock_run
 
   def test_successful_install(self):
-    with self._patched_install("numpy==1.26\n") as (temp_dir, mock_run):
-      _install_requirements(
-        MagicMock(), "gs://bucket/requirements.txt", temp_dir
-      )
+    with self._seeded_install("numpy==1.26\n") as (temp_dir, uri, mock_run):
+      _install_requirements(self.real_client(), uri, temp_dir)
 
     mock_run.assert_called_once()
     args = mock_run.call_args[0][0]
@@ -799,20 +846,16 @@ class TestInstallRequirements(absltest.TestCase):
 
   def test_failed_install_raises(self):
     with (
-      self._patched_install(
+      self._seeded_install(
         "nonexistent-package\n", returncode=1, stderr="ERROR: package not found"
-      ) as (temp_dir, _),
+      ) as (temp_dir, uri, _),
       self.assertRaisesRegex(RuntimeError, "Failed to install"),
     ):
-      _install_requirements(
-        MagicMock(), "gs://bucket/requirements.txt", temp_dir
-      )
+      _install_requirements(self.real_client(), uri, temp_dir)
 
   def test_empty_requirements_skipped(self):
-    with self._patched_install("") as (temp_dir, mock_run):
-      _install_requirements(
-        MagicMock(), "gs://bucket/requirements.txt", temp_dir
-      )
+    with self._seeded_install("") as (temp_dir, uri, mock_run):
+      _install_requirements(self.real_client(), uri, temp_dir)
 
     mock_run.assert_not_called()
 
@@ -820,21 +863,20 @@ class TestInstallRequirements(absltest.TestCase):
 class TestMainWithRequirements(_RunnerTestCase):
   def test_4th_arg_triggers_install(self):
     """When a 4th arg is provided, _install_requirements is called."""
-    storage_client = MagicMock()
-
     with mock.patch(
       "kinetic.runner.remote_runner._install_requirements"
     ) as mock_install:
       exit_code, _ = self.run_runner(
         payload=_basic_payload(_add, args=(2, 3)),
-        argv=[*_DEFAULT_ARGV, "gs://bucket/requirements.txt"],
-        storage_client=storage_client,
+        argv=lambda a: [*a.default_argv, "gs://bucket/requirements.txt"],
       )
 
     self.assertEqual(exit_code, 0)
     mock_install.assert_called_once_with(
-      storage_client, "gs://bucket/requirements.txt", mock.ANY
+      mock.ANY, "gs://bucket/requirements.txt", mock.ANY
     )
+    # The client handed to the installer is main()'s real storage client.
+    self.assertIsInstance(mock_install.call_args[0][0], storage.Client)
 
 
 class TestMainArgValidation(parameterized.TestCase):
@@ -853,32 +895,41 @@ class TestMainArgValidation(parameterized.TestCase):
     self.assertEqual(cm.exception.code, 1)
 
 
-class TestLeaderReadySentinel(absltest.TestCase):
+class TestLeaderReadySentinel(_EmulatorTestCase):
   """Workers must fail loudly (not hang) if the leader never signals."""
 
+  def _sentinel_env(self, bucket):
+    return mock.patch.dict(
+      os.environ,
+      {
+        "GCS_BUCKET": bucket,
+        "JOB_ID": "job-abc",
+        # Negative so leader_timeout + 60 buffer yields a small positive
+        # timeout that elapses quickly after one poll.
+        "KINETIC_DEBUG_WAIT_TIMEOUT": "-59",
+      },
+      clear=False,
+    )
+
   def test_wait_raises_when_sentinel_never_appears(self):
-    client = _fake_storage_client()
-    client.bucket.return_value.blob.return_value.exists.return_value = False
+    bucket = self.server.make_bucket(suffix="sentinel")
 
     with (
-      mock.patch.dict(
-        os.environ,
-        {
-          "GCS_BUCKET": "bkt",
-          "JOB_ID": "job-abc",
-          # Negative so leader_timeout + 60 buffer yields a small positive
-          # timeout that elapses quickly after one poll.
-          "KINETIC_DEBUG_WAIT_TIMEOUT": "-59",
-        },
-        clear=False,
-      ),
-      mock.patch(
-        "kinetic.runner.remote_runner.storage.Client", return_value=client
-      ),
+      self._sentinel_env(bucket),
       mock.patch("kinetic.runner.remote_runner.time.sleep"),
       self.assertRaisesRegex(RuntimeError, "Leader did not signal readiness"),
     ):
       _wait_for_leader_ready_sentinel()
+
+  def test_wait_returns_when_sentinel_exists(self):
+    bucket = self.server.make_bucket(suffix="sentinel")
+    self.server.write_blob(bucket, "job-abc/.leader_ready", b"")
+
+    with (
+      self._sentinel_env(bucket),
+      mock.patch("kinetic.runner.remote_runner.time.sleep"),
+    ):
+      _wait_for_leader_ready_sentinel()  # Returns without raising.
 
 
 class TestVerifySha256(absltest.TestCase):
@@ -906,19 +957,19 @@ class TestMainHashVerification(_RunnerTestCase):
     ("context_hash_mismatch", False, True, 1),
   )
   def test_hash_verification(self, break_payload, break_context, expected_code):
-    def argv(context_path, payload_path):
+    def argv(artifacts):
       return [
         "remote_runner.py",
         "--context-gcs",
-        "gs://bucket/context.zip",
+        artifacts.context_uri,
         "--payload-gcs",
-        "gs://bucket/payload.pkl",
+        artifacts.payload_uri,
         "--result-gcs",
-        "gs://bucket/result.pkl",
+        artifacts.result_uri,
         "--payload-sha256",
-        "0" * 64 if break_payload else _sha256(payload_path),
+        "0" * 64 if break_payload else _sha256(artifacts.payload_path),
         "--context-sha256",
-        "0" * 64 if break_context else _sha256(context_path),
+        "0" * 64 if break_context else _sha256(artifacts.context_path),
       ]
 
     exit_code, result = self.run_runner(
@@ -1570,7 +1621,7 @@ class TestMainPhaseFailures(_RunnerTestCase):
       testcase_name="requirements_install",
       runner_kwargs=lambda: {
         "payload": _basic_payload(_noop),
-        "argv": [*_DEFAULT_ARGV, "gs://bucket/requirements.txt"],
+        "argv": lambda a: [*a.default_argv, "gs://bucket/requirements.txt"],
         "patches": (
           mock.patch(
             "kinetic.runner.remote_runner._install_requirements",
@@ -1899,6 +1950,72 @@ class TestPreimportHfDependencies(parameterized.TestCase):
 
     self.assertIs(sys.modules["datasets"], sentinel)
     self.assertFalse(self.marker.exists())
+
+
+class TestMainSubprocess(_EmulatorTestCase):
+  """The interpreter-level entrypoint contract: a real ``python
+  remote_runner.py`` process, real argv parsing, real exit codes, and the
+  stdout stream the LogStreamer later reads — nothing patched at all."""
+
+  def setUp(self):
+    super().setUp()
+    # Payload functions must not be pickled by reference: the subprocess
+    # cannot import this module under the alias the test runner used.
+    cloudpickle.register_pickle_by_value(sys.modules[__name__])
+    self.addCleanup(
+      cloudpickle.unregister_pickle_by_value, sys.modules[__name__]
+    )
+
+  def _seed(self, payload):
+    """Upload artifacts for *payload*; returns the bucket name."""
+    bucket = self.server.make_bucket(suffix="subproc")
+    tmp = _make_temp_path(self)
+    context_zip = tmp / "context.zip"
+    _make_context_zip(context_zip)
+    self.server.write_blob(bucket, "job/context.zip", context_zip.read_bytes())
+    self.server.write_blob(
+      bucket, "job/payload.pkl", cloudpickle.dumps(payload)
+    )
+    return bucket
+
+  def _run(self, bucket):
+    env = {**os.environ, "STORAGE_EMULATOR_HOST": self.server.host}
+    return subprocess.run(
+      [
+        sys.executable,
+        remote_runner.__file__,
+        "--context-gcs",
+        f"gs://{bucket}/job/context.zip",
+        "--payload-gcs",
+        f"gs://{bucket}/job/payload.pkl",
+        "--result-gcs",
+        f"gs://{bucket}/job/result.pkl",
+      ],
+      env=env,
+      capture_output=True,
+      text=True,
+      timeout=120,
+    )
+
+  def test_success_roundtrip_exits_zero(self):
+    bucket = self._seed(_basic_payload(_add, args=(2, 3)))
+
+    proc = self._run(bucket)
+
+    self.assertEqual(proc.returncode, 0, proc.stderr)
+    result = cloudpickle.loads(self.server.read_blob(bucket, "job/result.pkl"))
+    self.assertTrue(result["success"])
+    self.assertEqual(result["result"], 5)
+
+  def test_user_exception_exits_one_with_result_payload(self):
+    bucket = self._seed(_basic_payload(_exit_with_code, args=(3,)))
+
+    proc = self._run(bucket)
+
+    self.assertEqual(proc.returncode, 1, proc.stderr)
+    result = cloudpickle.loads(self.server.read_blob(bucket, "job/result.pkl"))
+    self.assertFalse(result["success"])
+    self.assertIn("sys.exit(3)", str(result["exception"]))
 
 
 if __name__ == "__main__":
