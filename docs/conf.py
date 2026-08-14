@@ -79,6 +79,27 @@ html_theme_options = {
   "logo": {
     "text": "⚡ Kinetic",
   },
+  # Keep the pydata navbar empty. sphinx-book-theme suppresses that navbar in
+  # its theme.conf, but since pydata-sphinx-theme 0.17.1 the default is
+  # re-injected from Python (update_config) into html_theme_options, which sits
+  # above theme.conf inheritance, so the suppression is bypassed. The navbar
+  # then renders a second, hidden set of sidebar toggle buttons; pydata's JS
+  # binds its handlers with querySelector(".primary-toggle") and wires up those
+  # hidden buttons instead of the visible ones, so the mobile menus stop
+  # opening. It also renders the persistent search box two extra times.
+  # Setting this explicitly suppresses the injection.
+  # https://github.com/executablebooks/sphinx-book-theme/issues/988
+  "navbar_persistent": [],
+}
+# The search page renders its own search box in the body, so drop the
+# sidebar's persistent one there — otherwise the page shows two.
+# Mirrors the theme default minus "search-button-field.html".
+html_sidebars = {
+  "search": [
+    "navbar-logo.html",
+    "icon-links.html",
+    "sbt-sidebar-nav.html",
+  ],
 }
 html_static_path = ["_static"]
 html_css_files = [

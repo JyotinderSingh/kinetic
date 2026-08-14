@@ -141,9 +141,22 @@ body {
 .bd-sidebar-primary {
   background: var(--pst-color-background);
   border-right: 1px solid var(--pst-color-border-muted);
-  width: 19rem;
-  padding: 1.25rem 1rem;
   font-size: var(--pst-sidebar-font-size);
+}
+
+/* Width and padding are desktop-only on purpose. Below 992px the theme
+   turns this element into a slide-in <dialog> and hides it with
+   `width: 75%; margin-left: -75%`, so a fixed width breaks that pairing:
+   the closed panel then overhangs the left edge (34px at a 360px
+   viewport) and, mid-transition, covers the hamburger button. Padding is
+   left to the theme there too — the modal closes on clicks that land on
+   the dialog itself, so extra padding becomes a dead ring around the
+   nav that dismisses it. */
+@media (min-width: 992px) {
+  .bd-sidebar-primary {
+    width: 19rem;
+    padding: 1.25rem 1rem;
+  }
 }
 
 /* Logo / wordmark */
