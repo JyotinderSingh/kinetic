@@ -793,7 +793,7 @@ class TestResultFailurePaths(absltest.TestCase):
         "kinetic.jobs.k8s_utils.collect_pod_failure_details",
         return_value="  worker-1: exit code 137",
       ) as mock_details,
-      mock.patch("kinetic.jobs.client.CoreV1Api") as mock_core_api,
+      mock.patch("kinetic.jobs.k8s_utils.core_v1") as mock_core_v1,
       mock.patch.object(handle, "cleanup") as mock_cleanup,
       self.assertRaises(RuntimeError) as raised,
     ):
@@ -805,7 +805,7 @@ class TestResultFailurePaths(absltest.TestCase):
     self.assertIn("gs://proj-kn-cluster-jobs/job-a1b2/result.pkl", message)
     self.assertIn("worker-1: exit code 137", message)
     mock_details.assert_called_once_with(
-      mock_core_api.return_value, "kinetic-job-a1b2", "default"
+      mock_core_v1.return_value, "kinetic-job-a1b2", "default"
     )
     mock_cleanup.assert_called_once_with(
       k8s=True, gcs=False, cleanup_timeout=180, cleanup_poll_interval=2
@@ -824,7 +824,7 @@ class TestResultFailurePaths(absltest.TestCase):
       ),
       mock.patch("kinetic.jobs.ensure_credentials"),
       mock.patch(
-        "kinetic.jobs.client.CoreV1Api",
+        "kinetic.jobs.k8s_utils.core_v1",
         side_effect=RuntimeError("no kube config"),
       ),
       mock.patch.object(handle, "cleanup") as mock_cleanup,

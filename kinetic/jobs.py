@@ -323,7 +323,7 @@ class JobHandle:
     try:
       self._ensure_credentials()
       details = k8s_utils.collect_pod_failure_details(
-        client.CoreV1Api(), self.k8s_name, self.namespace
+        k8s_utils.core_v1(), self.k8s_name, self.namespace
       )
     except Exception as e:
       logging.warning(
