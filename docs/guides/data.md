@@ -33,6 +33,32 @@ process_data(Data("gs://my-bucket/training-set/"))
 The function code is the same for a local directory and for a Cloud
 Storage directory. In both cases `data_path` is a directory on the pod.
 
+A `Data` that names one file resolves to a file path, not a directory —
+for local files and for single GCS objects alike:
+
+```python
+@kinetic.run(accelerator="cpu")
+def load_weights(weights_path):
+  import h5py
+
+  with h5py.File(weights_path) as f:
+    return list(f.keys())
+
+
+# Local file
+load_weights(Data("./weights.h5"))
+
+# Single GCS object — no trailing slash
+load_weights(Data("gs://my-bucket/checkpoints/weights.h5"))
+```
+
+:::{important}
+The trailing slash is what tells Kinetic which one you mean.
+`Data("gs://my-bucket/dataset/")` is a directory; without the slash the
+same URI names one object. Kinetic warns at submit time when a slashless
+path looks like a directory (its last segment has no file extension).
+:::
+
 ## Two ways to pass `Data`
 
 You can pass a `Data` object in two places:
@@ -150,7 +176,15 @@ def read_config(config_path):
 
 
 read_config(Data("./config.json", fuse=True))
+
+# A single GCS object works the same way
+read_config(Data("gs://my-bucket/configs/model.json", fuse=True))
 ```
+
+GCS FUSE can mount directories only, so for a single object Kinetic
+mounts the object's parent and then hands your function the path of that
+one object inside it. The parent's other objects are mounted too, but
+lazily: nothing is read until you open it.
 
 You can mix FUSE-mounted data and downloaded data in one job:
 
@@ -236,23 +270,6 @@ For a runnable script that loads a public Hugging Face dataset with
 :::
 
 ## Limits and pitfalls
-
-:::{warning}
-**Kinetic does not support a single Cloud Storage object today.**
-`Data("gs://my-bucket/dir/file.h5")`, without a trailing slash, does not
-give your function that file. The download path finds nothing, and the
-function receives an empty directory. The FUSE path mounts the parent
-prefix and can return a different file from the same prefix. Do one of
-these two things instead:
-
-- Point at the directory with a trailing slash:
-  `Data("gs://my-bucket/dir/")`. Then open `file.h5` inside the path
-  that your function receives.
-- Upload the file from your machine: `Data("./file.h5")`. A local single
-  file resolves to a file path on the pod.
-:::
-
-Other limits:
 
 - **A `gs://` directory needs a trailing slash.** Kinetic reads
   `Data("gs://my-bucket/dataset/")` as a directory and
@@ -423,6 +440,23 @@ Storage URI always points to the hash prefix directory, not to a file.
 For a `gs://` or `hf://` `Data` object, `upload_data()` returns the
 original URI without an upload.
 
+GCS-hosted `Data` skips this pipeline: `upload_data()` returns the URI
+that you gave. An `is_dir=False` ref thus carries one of two shapes, and
+`_download_data()` in `remote_runner.py` must serve both:
+
+| Source                         | Ref `uri`                          | Names      |
+| ------------------------------ | ---------------------------------- | ---------- |
+| Uploaded local file            | `gs://bucket/ns/data-cache/{hash}` | a directory |
+| `Data("gs://bucket/dir/f.h5")` | `gs://bucket/dir/f.h5`             | the object |
+
+Only the second one names a blob. The download therefore tries a direct
+object fetch first, and falls back to a listing of the URI as a prefix.
+In both cases the file lands in the target directory under its own name,
+and `resolve_data_refs()` gives the user function that file path. An
+`is_dir=False` ref that matches neither an object nor a prefix raises
+`FileNotFoundError` with the URI in the message. It does not resolve to
+an empty directory.
+
 ### FUSE mount implementation
 
 GCS FUSE mounts directories, not single files. Three layers handle
@@ -448,9 +482,19 @@ inline ephemeral CSI volume with the `implicit-dirs` mount option. The
 `only-dir` mount option scopes the mount to one Cloud Storage prefix. For
 a single file (`is_dir=False`), Kinetic mounts the parent directory. The
 pod receives a `gke-gcsfuse/volumes: "true"` annotation, and GKE then
-injects the GCS FUSE sidecar. On the pod, `_resolve_fuse_single_file()`
-returns the first entry of the mount directory. That result is correct
-for an uploaded local file, which is alone under its hash prefix. For a
-`gs://` single object, the parent prefix can hold many objects, and the
-first entry can be a different file. That is the reason for the
-limitation in the [Limits and pitfalls](#limits-and-pitfalls) section.
+injects the GCS FUSE sidecar.
+
+**Picking the file back out of the mount:**
+`_resolve_fuse_single_file()` in `remote_runner.py` turns the mounted
+directory back into a file path. It takes the last segment of the ref's
+`uri` and looks for that name in the mount. The two ref shapes above
+resolve through different branches, and both are exact:
+
+- A GCS-native object names itself. The lookup thus finds it among the
+  siblings that the parent mount also shows.
+- An uploaded file's ref names its hash directory, so the lookup finds
+  nothing. That directory holds exactly one object, which is the file.
+
+If the named object is absent from a mount that holds more than one
+entry, the runner raises `FileNotFoundError`. It does not guess a
+sibling.
