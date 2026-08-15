@@ -212,6 +212,20 @@ class JobHandle:
     """Return the GCS URI of this job's result payload."""
     return f"gs://{self.bucket_name}/{self.job_id}/result.pkl"
 
+  def _blob_uri(self, blob_name: str) -> str:
+    """Return the GCS URI of a blob inside this job's bucket."""
+    return f"gs://{self.bucket_name}/{blob_name}"
+
+  @property
+  def _is_multi_host(self) -> bool:
+    """Whether this job can run more than one pod.
+
+    Only the Pathways (LeaderWorkerSet) backend does, so it is the only
+    one that can leave per-host result payloads behind — every other
+    backend runs a single pod and is spared the extra GCS listing.
+    """
+    return self.backend == "pathways"
+
   def _download_result_payload(self) -> dict[str, Any]:
     """Download and deserialize the remote result payload.
 
@@ -264,6 +278,97 @@ class JobHandle:
       raise RuntimeError("result payload download retries were not attempted")
     raise last_error
 
+  def _download_worker_payload(self, blob_name: str) -> dict[str, Any] | None:
+    """Download and deserialize one per-host result payload.
+
+    Diagnostics only: every failure degrades to None with a warning
+    rather than replacing the error the caller is already reporting.
+    """
+    try:
+      local_path = storage.download_worker_result(
+        self.bucket_name, blob_name, project=self.project
+      )
+    except Exception as e:
+      logging.warning(
+        "Could not download per-host result %s: %s",
+        self._blob_uri(blob_name),
+        e,
+      )
+      return None
+    try:
+      with open(local_path, "rb") as f:
+        payload = cloudpickle.load(f)
+    except Exception as e:
+      logging.warning(
+        "Could not deserialize per-host result %s: %s",
+        self._blob_uri(blob_name),
+        e,
+      )
+      return None
+    finally:
+      try:
+        os.remove(local_path)
+      except OSError as e:
+        logging.warning(
+          "Failed to remove temporary result file %s: %s", local_path, e
+        )
+    return payload if isinstance(payload, dict) else None
+
+  def _worker_failures(self) -> list[tuple[int, str, dict[str, Any]]]:
+    """Return the failure payloads written by this job's non-leader hosts.
+
+    Returns:
+      `(host_index, blob_name, payload)` triples ordered by host index.
+      Empty for single-pod backends, for jobs whose hosts all completed,
+      and whenever the listing itself could not be performed.
+    """
+    if not self._is_multi_host:
+      return []
+    try:
+      entries = storage.list_worker_results(
+        self.bucket_name, self.job_id, project=self.project
+      )
+    except Exception as e:
+      logging.warning(
+        "Could not list per-host result payloads for job %s: %s",
+        self.job_id,
+        e,
+      )
+      return []
+
+    failures = []
+    for host_index, blob_name in entries:
+      payload = self._download_worker_payload(blob_name)
+      if payload is not None and not payload.get("success"):
+        failures.append((host_index, blob_name, payload))
+    return failures
+
+  def _worker_failure_error(self) -> BaseException | None:
+    """Return the exception reported by the lowest-indexed failing host.
+
+    Non-leader hosts upload a failure payload each, so the exception
+    that surfaces locally is decided by host index rather than by
+    whichever pod wrote to GCS last.
+
+    Returns:
+      The remote exception to re-raise, or None when no host reported
+      one (single-pod backends, an unreachable bucket, or payloads this
+      client cannot deserialize).
+    """
+    failures = self._worker_failures()
+    if not failures:
+      return None
+    host_index, blob_name, payload = failures[0]
+    exception = self._remote_failure(payload, self._blob_uri(blob_name))
+    note = (
+      f"Reported by host {host_index} of multi-host job {self.job_id} "
+      f"({self._blob_uri(blob_name)})."
+    )
+    others = [str(index) for index, _, _ in failures[1:]]
+    if others:
+      note += f" Other hosts that also failed: {', '.join(others)}."
+    return _attach_note(exception, note)
+
   def _missing_result_error(self, status: JobStatus) -> RuntimeError:
     """Return a clear failure for terminal jobs without a result payload."""
     result_uri = self._result_uri()
@@ -280,14 +385,23 @@ class JobHandle:
       f"Job completed but no result payload was found at {result_uri}"
     )
 
-  def _remote_failure(self, result_payload: dict[str, Any]) -> BaseException:
-    """Return the exception to raise for a non-successful result payload."""
+  def _remote_failure(
+    self, result_payload: dict[str, Any], result_uri: str | None = None
+  ) -> BaseException:
+    """Return the exception to raise for a non-successful result payload.
+
+    Args:
+      result_payload: The deserialized payload written by a remote host.
+      result_uri: GCS URI the payload came from, named in the messages.
+        Defaults to the job's leader payload.
+    """
+    result_uri = result_uri or self._result_uri()
     exception = result_payload.get("exception")
     if not isinstance(exception, BaseException):
       exception = RuntimeError(
         f"Job {self.job_id} failed but its result payload carried no usable "
         f"exception object (got {type(exception).__name__}: {exception!r}). "
-        f"Artifacts were kept for inspection: {self._result_uri()}"
+        f"Artifacts were kept for inspection: {result_uri}"
       )
     if result_payload.get("serialization_failed"):
       result_repr = result_payload.get("result_repr") or "<unavailable>"
@@ -295,7 +409,7 @@ class JobHandle:
         exception,
         "The remote function completed but its return value could not be "
         f"serialized, so it cannot be retrieved. repr(result):\n{result_repr}\n"
-        f"Artifacts were kept for inspection: {self._result_uri()}",
+        f"Artifacts were kept for inspection: {result_uri}",
       )
     phase = result_payload.get("phase")
     if phase:
@@ -310,6 +424,11 @@ class JobHandle:
     computation as a whole cannot be trusted.  Returning the leader's
     value would silently hide the failure; surface it instead, with pod
     failure details when they can still be collected.
+
+    This is the fallback for when no host left a failure payload behind
+    — a host killed outright by the kubelet (OOM, preemption, node
+    eviction) never gets to write one.  When one exists,
+    `_worker_failure_error` re-raises that host's exception instead.
     """
     msg = (
       f"Job {self.job_id} finished with status FAILED, but its result "
@@ -454,9 +573,11 @@ class JobHandle:
       RuntimeError: If the job failed without uploading a result, if
         the downloaded result payload cannot be deserialized locally,
         or if a job whose status is FAILED uploaded a success payload
-        (e.g. a multi-host job whose worker pod failed after the
-        leader uploaded its result).
+        and no host recorded an exception explaining the failure.
       Exception: Re-raised from the remote function on user failure.
+        For a multi-host job this is the leader's exception when the
+        leader itself failed, and otherwise the exception from the
+        lowest-indexed host that did.
     """
     if cleanup is None:
       cleanup = not self.debug
@@ -508,6 +629,12 @@ class JobHandle:
       try:
         result_payload = self._download_result_payload_with_backoff(deadline)
       except google_exceptions.NotFound:
+        # The leader never wrote a payload.  A host that failed before
+        # it did still explains why far better than "no result payload
+        # was found", so prefer its exception.
+        worker_failure = self._worker_failure_error()
+        if worker_failure is not None:
+          raise worker_failure from None
         raise self._missing_result_error(observed_status) from None
 
       if not isinstance(result_payload, dict):
@@ -528,6 +655,11 @@ class JobHandle:
         # FAILED, even when the payload claims success (e.g. a Pathways
         # worker pod failed after the leader uploaded its result).
         # `collected` stays False so the artifacts are preserved.
+        # The failing host's own exception is the useful error; pod exit
+        # summaries are the fallback when no host recorded one.
+        worker_failure = self._worker_failure_error()
+        if worker_failure is not None:
+          raise worker_failure
         raise self._false_success_error()
       collected = succeeded and not serialization_failed
       if collected:

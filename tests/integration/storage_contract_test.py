@@ -43,11 +43,11 @@ def _write_artifacts(tmp_path):
   return str(payload_path), str(context_path)
 
 
-def _make_handle(bucket_name, job_id="job-itest01"):
+def _make_handle(bucket_name, job_id="job-itest01", backend="gke"):
   """A JobHandle aimed at *bucket_name*; k8s fields are inert strings."""
   return jobs.JobHandle(
     job_id=job_id,
-    backend="gke",
+    backend=backend,
     project=FakeGcsTestCase.PROJECT,
     cluster_name="itest-cluster",
     zone="us-central1-a",
@@ -174,6 +174,134 @@ class TestManifests(FakeGcsTestCase):
     # The documented contract maps GCS NotFound to FileNotFoundError.
     with self.assertRaises(FileNotFoundError):
       storage.download_manifest(bucket, "grp-none", project=self.PROJECT)
+
+
+class TestWorkerResults(FakeGcsTestCase):
+  """Per-host failure payloads written by a multi-host job's non-leaders."""
+
+  JOB_ID = "job-itest01"
+
+  def _seed(self, bucket, payloads):
+    """Write `{host_index: payload}` to their conventional blob names."""
+    for host_index, payload in payloads.items():
+      self.server.write_blob(
+        bucket,
+        storage.worker_result_blob_name(self.JOB_ID, host_index),
+        cloudpickle.dumps(payload),
+      )
+
+  def _failure(self, host_index, message):
+    return {
+      "success": False,
+      "result": None,
+      "exception": ValueError(message),
+      "traceback": f"Traceback: {message}",
+      "phase": "execute",
+      "host_index": host_index,
+    }
+
+  def test_listing_is_ordered_numerically_not_lexicographically(self):
+    """GCS lists "10" before "2"; callers need the real host order."""
+    bucket = self.make_bucket()
+    self._seed(bucket, {index: self._failure(index, "x") for index in (2, 10)})
+
+    found = storage.list_worker_results(
+      bucket, self.JOB_ID, project=self.PROJECT
+    )
+
+    self.assertEqual(
+      found,
+      [
+        (2, f"{self.JOB_ID}/result-worker-2.pkl"),
+        (10, f"{self.JOB_ID}/result-worker-10.pkl"),
+      ],
+    )
+
+  def test_leader_result_and_other_artifacts_are_not_listed(self):
+    bucket = self.make_bucket()
+    for name in ("result.pkl", "payload.pkl", "context.zip", "handle.json"):
+      self.server.write_blob(bucket, f"{self.JOB_ID}/{name}", b"x")
+    self._seed(bucket, {1: self._failure(1, "boom")})
+
+    found = storage.list_worker_results(
+      bucket, self.JOB_ID, project=self.PROJECT
+    )
+
+    self.assertEqual(found, [(1, f"{self.JOB_ID}/result-worker-1.pkl")])
+
+  def test_unparsable_index_is_skipped(self):
+    bucket = self.make_bucket()
+    self.server.write_blob(bucket, f"{self.JOB_ID}/result-worker-abc.pkl", b"x")
+    self._seed(bucket, {1: self._failure(1, "boom")})
+
+    found = storage.list_worker_results(
+      bucket, self.JOB_ID, project=self.PROJECT
+    )
+
+    self.assertEqual(found, [(1, f"{self.JOB_ID}/result-worker-1.pkl")])
+
+  def test_no_worker_payloads_lists_empty(self):
+    bucket = self.make_bucket()
+    self.server.write_blob(bucket, f"{self.JOB_ID}/result.pkl", b"x")
+
+    self.assertEqual(
+      storage.list_worker_results(bucket, self.JOB_ID, project=self.PROJECT),
+      [],
+    )
+
+  def test_download_roundtrips_the_payload(self):
+    bucket = self.make_bucket()
+    self._seed(bucket, {3: self._failure(3, "host 3 exploded")})
+    blob_name = storage.worker_result_blob_name(self.JOB_ID, 3)
+
+    local_path = storage.download_worker_result(
+      bucket, blob_name, project=self.PROJECT
+    )
+    self.addCleanup(
+      lambda: os.path.exists(local_path) and os.remove(local_path)
+    )
+
+    with open(local_path, "rb") as f:
+      payload = cloudpickle.load(f)
+    self.assertEqual(payload["host_index"], 3)
+    self.assertIn("host 3 exploded", str(payload["exception"]))
+
+  def test_cleanup_deletes_per_host_payloads_too(self):
+    bucket = self.make_bucket()
+    self.server.write_blob(bucket, f"{self.JOB_ID}/result.pkl", b"x")
+    self._seed(bucket, {1: self._failure(1, "boom")})
+
+    storage.cleanup_artifacts(bucket, self.JOB_ID, project=self.PROJECT)
+
+    self.assertEqual(self.server.list_blob_names(bucket, f"{self.JOB_ID}/"), [])
+
+  def test_handle_reports_the_lowest_indexed_failing_host(self):
+    """End to end over real blobs: which host surfaces is deterministic."""
+    bucket = self.make_bucket()
+    self._seed(
+      bucket,
+      {
+        3: self._failure(3, "host 3 exploded"),
+        1: self._failure(1, "host 1 exploded"),
+        2: {"success": True, "result": None, "host_index": 2},
+      },
+    )
+    handle = _make_handle(bucket, job_id=self.JOB_ID, backend="pathways")
+
+    error = handle._worker_failure_error()
+
+    self.assertIsInstance(error, ValueError)
+    self.assertIn("host 1 exploded", str(error))
+    notes = "\n".join(error.__notes__)
+    self.assertIn("Reported by host 1", notes)
+    # Host 2 succeeded, so only host 3 is listed alongside.
+    self.assertIn("Other hosts that also failed: 3", notes)
+
+  def test_handle_reports_nothing_when_no_host_failed(self):
+    bucket = self.make_bucket()
+    handle = _make_handle(bucket, job_id=self.JOB_ID, backend="pathways")
+
+    self.assertIsNone(handle._worker_failure_error())
 
 
 class TestCleanupArtifacts(FakeGcsTestCase):

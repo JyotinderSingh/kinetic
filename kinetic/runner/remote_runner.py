@@ -56,6 +56,20 @@ _LEADER_READY_SENTINEL = ".leader_ready"
 # wait_for_client() returns.
 _WORKER_WAIT_BUFFER_SECONDS = 60
 
+# Environment variables carrying this pod's process index within a
+# multi-host job, in priority order. The Pathways/LWS pod spec sets
+# TPU_WORKER_ID from LWS_WORKER_INDEX; LWS_WORKER_INDEX itself is read as
+# a fallback because the "$(VAR)" substitution only expands when the
+# webhook-injected variable precedes it in the container's env list.
+# Single-host jobs set neither and are always their own leader.
+_HOST_INDEX_ENV_VARS = ("TPU_WORKER_ID", "LWS_WORKER_INDEX")
+
+# Blob name a non-leader host writes its failure payload to, beside the
+# leader's result.pkl. Kept in sync with
+# ``kinetic.utils.storage.worker_result_blob_name`` on the client side —
+# this module ships standalone inside the container and cannot import it.
+_WORKER_RESULT_TEMPLATE = "result-worker-{index}.pkl"
+
 
 def _verify_sha256(path, expected_hash, name):
   """Verify the SHA-256 hash of a downloaded file."""
@@ -70,6 +84,52 @@ def _verify_sha256(path, expected_hash, name):
       f"Expected {expected_hash}, got {actual_hash}. "
       f"The file may have been tampered with."
     )
+
+
+def _host_index():
+  """Return this pod's process index within the job (0 for the leader).
+
+  Every pod of a multi-host job is launched with the same command, so
+  the index is the only thing distinguishing them. A missing variable
+  means a single-host job, whose one pod is its own leader; a variable
+  set to something that is not a host index is reported and ignored
+  rather than silently demoting the leader.
+  """
+  for name in _HOST_INDEX_ENV_VARS:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+      continue
+    try:
+      index = int(raw)
+    except ValueError:
+      logging.warning(
+        "Ignoring %s=%r: expected an integer host index.", name, raw
+      )
+      continue
+    if index < 0:
+      logging.warning(
+        "Ignoring %s=%r: host index cannot be negative.", name, raw
+      )
+      continue
+    return index
+  return 0
+
+
+def _worker_result_uri(result_gcs, host_index):
+  """Return the per-host failure payload URI beside *result_gcs*.
+
+  Args:
+      result_gcs: The job-wide result URI every pod is given.
+      host_index: This pod's process index (never 0 — the leader writes
+          *result_gcs* itself).
+
+  Returns:
+      A GCS URI in the same job prefix, e.g.
+      ``gs://bucket/job-a1/result-worker-3.pkl``.
+  """
+  prefix, separator, _ = result_gcs.rpartition("/")
+  name = _WORKER_RESULT_TEMPLATE.format(index=host_index)
+  return f"{prefix}{separator}{name}" if separator else name
 
 
 def main():
@@ -110,7 +170,17 @@ def main():
     logging.error("Missing required arguments for artifacts.")
     sys.exit(1)
 
-  logging.info("Starting remote execution")
+  host_index = _host_index()
+  is_leader = host_index == 0
+  # Only the leader writes the result.pkl the client reads back, so the
+  # returned value is always process 0's — not whichever host happened
+  # to upload last. Every other host reports a failure to its own blob,
+  # which the client aggregates to surface the real exception.
+  host_result_gcs = (
+    result_gcs if is_leader else _worker_result_uri(result_gcs, host_index)
+  )
+
+  logging.info("Starting remote execution (host index %d)", host_index)
 
   # Create secure temp directory and register cleanup
   temp_dir = tempfile.mkdtemp(prefix="kinetic-run-")
@@ -224,11 +294,12 @@ def main():
     _write_failure_result(
       storage_client,
       result_path,
-      result_gcs,
+      host_result_gcs,
       phase,
       setup_err,
       setup_traceback,
       hint,
+      host_index=host_index,
     )
     _exit_process(1)
     return
@@ -274,6 +345,18 @@ def main():
     else:
       exception = RuntimeError(f"{type(e).__name__}: {e}")
 
+  if exception is None and not is_leader:
+    # The leader's payload is the job's result, so a non-leader's return
+    # value is discarded — deliberately without serializing it, which
+    # keeps a large per-host return value from being pickled and
+    # uploaded once per host for nothing.
+    logging.info(
+      "Host %d completed successfully; the leader owns the result payload.",
+      host_index,
+    )
+    _exit_process(0)
+    return
+
   # Serialize result or exception
   result_payload = {
     "success": exception is None,
@@ -281,14 +364,15 @@ def main():
     "exception": exception,
     "traceback": remote_traceback,
     "phase": "execute",
+    "host_index": host_index,
   }
   serialization_failed = _dump_result_payload(
     result_path, result_payload, result, remote_traceback
   )
 
   try:
-    logging.info("Uploading result...")
-    _upload_to_gcs(storage_client, result_path, result_gcs)
+    logging.info("Uploading result to %s", host_result_gcs)
+    _upload_to_gcs(storage_client, result_path, host_result_gcs)
   except BaseException as upload_err:  # noqa: BLE001 - report, then exit
     logging.error("Failed to upload result: %s", upload_err)
     traceback.print_exc()
@@ -496,6 +580,7 @@ def _dump_result_payload(result_path, result_payload, result, remote_traceback):
       "phase": "result serialization",
       "serialization_failed": True,
       "result_repr": _safe_repr(result),
+      "host_index": result_payload.get("host_index", 0),
     }
     try:
       with open(result_path, "wb") as f:
@@ -517,7 +602,14 @@ def _safe_repr(obj):
 
 
 def _write_failure_result(
-  storage_client, result_path, result_gcs, phase, exc, tb, hint=None
+  storage_client,
+  result_path,
+  result_gcs,
+  phase,
+  exc,
+  tb,
+  hint=None,
+  host_index=0,
 ):
   """Write and upload a result payload for a pre-execution failure.
 
@@ -527,11 +619,14 @@ def _write_failure_result(
   Args:
       storage_client: Cloud Storage client, or None if it never came up.
       result_path: Local path to write the payload to.
-      result_gcs: GCS URI to upload the payload to.
+      result_gcs: GCS URI to upload the payload to — this host's blob,
+          which for a non-leader is its own ``result-worker-N.pkl``.
       phase: Runner phase that failed, e.g. ``"payload unpickle"``.
       exc: The exception that caused the failure.
       tb: Formatted traceback for the failure.
       hint: Optional extra diagnostics appended to the message.
+      host_index: This pod's process index, recorded so the client can
+          name the host that failed.
   """
   message = f"kinetic {phase} failed: {type(exc).__name__}: {exc}"
   if hint:
@@ -542,6 +637,7 @@ def _write_failure_result(
     "exception": RuntimeError(message),
     "traceback": tb,
     "phase": phase,
+    "host_index": host_index,
   }
   try:
     with open(result_path, "wb") as f:

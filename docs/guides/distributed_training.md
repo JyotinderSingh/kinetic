@@ -85,10 +85,44 @@ the actual cross-host communication. Kinetic's job is to:
   fetch it directly from the per-host pods (see "Debugging distributed
   jobs" below).
 - Return only the leader process's (`jax.process_index() == 0`) value
-  to your local machine, so you don't get N copies of the result.
+  to your local machine, so you don't get N copies of the result — and
+  re-raise the failing host's exception when any host throws. The next
+  section covers both.
 
-When a host throws, Kinetic catches the exception and re-raises it
-locally with the failing host's traceback attached.
+## What comes back from which host
+
+Every host runs the same command, so Kinetic decides ownership by
+process index rather than by whoever finishes first:
+
+- **The leader owns the result.** Only process 0 writes the job's
+  `result.pkl`, so the value you get back is always the leader's. Other
+  hosts discard their return value without serializing it.
+- **Every host reports its own failures.** A non-leader host that raises
+  writes a failure payload of its own, tagged with its process index.
+- **The lowest-indexed failing host is the one that raises locally.** If
+  the leader itself failed, its exception is the job's exception.
+  Otherwise Kinetic re-raises the exception from the lowest-indexed host
+  that recorded one, with that host's remote traceback attached and a
+  note listing the other hosts that also failed.
+
+So a worker crash no longer hides behind the leader's successful return
+value, and the exception you see does not depend on which pod reached
+Cloud Storage last.
+
+:::{admonition} Return values must come from process 0
+:class: tip
+
+Only the leader's return value survives, so anything you need locally
+has to be on process 0 by the time your function returns. Gather
+sharded state with a JAX collective (or `jax.device_get` on a fully
+replicated array) before returning it — a value computed only on
+process 3 is discarded with the rest of that host's return.
+:::
+
+A host that the kubelet kills outright — OOM, spot preemption, node
+eviction — never gets to write a payload. The job still fails, and
+Kinetic reports the pod exit summaries it can still collect from
+Kubernetes instead of a remote traceback.
 
 :::{warning}
 **When not to use this:** if your model and batch fit on a single TPU
@@ -113,10 +147,11 @@ ones, with what to actually do:
   `jax.device_count()` and `jax.process_count()` instead of hardcoding.
 - **One host hangs, the slice times out.** A single host that fails
   collective communication takes the slice with it. JAX raises a
-  collective timeout on every host. *Fix:* read logs from every host —
-  Kinetic interleaves them — and look for the divergent one. Common
-  causes are uneven data loading or a Python exception on one host
-  before the collective.
+  collective timeout on every host. *Fix:* the exception Kinetic raises
+  names the host that reported it; when every host reports the same
+  collective timeout, read logs from the per-host pods and look for the
+  divergent one. Common causes are uneven data loading or a Python
+  exception on one host before the collective.
 - **Spot preemption.** Multi-host slices on spot capacity die together
   if any one host is preempted. *Fix:* don't use spot for multi-host
   unless you can absorb full restarts (and have checkpoints).
@@ -157,8 +192,11 @@ Cloud Logging in the GCP Console offers the same view through a UI
 filter on the job name.
 
 If a job fails on any host, Kinetic catches the exception and re-raises
-it locally with that host's stack trace, so you usually do not need to
-inspect non-leader logs to diagnose a crash.
+it locally with that host's stack trace and process index, so you
+usually do not need to inspect non-leader logs to diagnose a crash. Go
+to the pod logs when the raised error is a collective timeout (the
+symptom on every host, not the cause) or when the message says the pod
+was terminated before it could report anything.
 
 ## Related pages
 
