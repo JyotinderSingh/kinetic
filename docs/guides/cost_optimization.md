@@ -111,6 +111,16 @@ kinetic pool add --accelerator a100 --spot
 2. **Use Checkpointing:** Use Kinetic's integration with **Orbax** (see the [Checkpointing Guide](checkpointing.md)) to continuously flush state to Cloud Storage (`gs://`). If a Spot preemption kills your training run midway, you can resume from the last saved checkpoint instead of restarting from scratch.
 3. **Multi-Host TPUs:** While you can provision Spot pools for multi-node TPUs (such as `tpu-v3`, `tpu-v4`, `tpu-v5p`, or `tpu-v6e`), if any single host in the TPU slice is preempted, the entire slice job will fail. Spot pricing is therefore highly effective for single-host jobs (like `tpu-v5litepod-4`, `tpu-v5litepod-8`, or `l4` workloads) where you minimize the probability of aggregate preemption.
 
+### Verify the Provisioning Model
+
+Kinetic records the Spot setting in the cluster state. Later `kinetic pool add`, `kinetic pool remove`, and `kinetic up` commands keep the setting on the pool.
+
+To see the provisioning model of each pool, run `kinetic pool list`. The `Provisioning` row shows `Spot` or `On-demand`.
+
+:::{note}
+Kinetic records the Spot setting when it creates the pool. A pool from an earlier version of Kinetic has no such record, and the `Provisioning` row is absent. The next `kinetic pool add` or `kinetic pool remove` command rebuilds that pool as on-demand. To keep Spot capacity, remove the pool and add it again with `--spot`.
+:::
+
 ---
 
 ## 5. Managing Capacity Reservations
