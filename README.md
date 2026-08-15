@@ -67,7 +67,7 @@ new one. It ends by saving a profile that becomes your active context
 
 Behind the scenes, the Create path runs `kinetic up` to enable APIs,
 provision a GKE cluster with an accelerator node pool, and configure
-local Docker / `kubectl` access. Run `kinetic down` when you're done.
+`kubectl` access. Run `kinetic down` when you're done.
 
 ## Recommended first run
 
@@ -76,8 +76,10 @@ python examples/fashion_mnist.py
 ```
 
 No environment variables needed — `kinetic init` set an active
-profile. The first run takes ~5 minutes (it builds a container image
-with your dependencies via Cloud Build). Subsequent runs with
+profile. Make sure the cluster has a node pool for the script's
+accelerator (`kinetic pool list`; `kinetic pool add --accelerator
+tpu-v5litepod-1` if not). The first run takes 5–10 minutes (it builds a
+container image with your dependencies via Cloud Build). Subsequent runs with
 unchanged dependencies start in under a minute.
 
 For the full first-run walkthrough, see the
@@ -91,7 +93,8 @@ guide.
 | How do I get my first job running?               | [Getting Started](https://kinetic.readthedocs.io/en/latest/getting_started.html)                                                                          |
 | When should I use `run_async()` instead of `run()`? | [Detached Jobs](https://kinetic.readthedocs.io/en/latest/guides/async_jobs.html)                                                                        |
 | How do I ship data and persist outputs?          | [Data](https://kinetic.readthedocs.io/en/latest/guides/data.html) and [Checkpointing](https://kinetic.readthedocs.io/en/latest/guides/checkpointing.html) |
-| Bundled vs prebuilt vs custom image — which one? | [Execution Modes](https://kinetic.readthedocs.io/en/latest/guides/execution_modes.html)                                                                   |
+| How does Kinetic work end to end?                | [How Kinetic Works](https://kinetic.readthedocs.io/en/latest/concepts.html)                                                                              |
+| Bundled vs prebuilt vs custom image — which one? | [Container Images](https://kinetic.readthedocs.io/en/latest/guides/containers.html)                                                                      |
 | Something's broken; where do I start?            | [Troubleshooting](https://kinetic.readthedocs.io/en/latest/troubleshooting.html)                                                                          |
 
 ## Configuration

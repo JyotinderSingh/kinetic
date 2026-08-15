@@ -1,26 +1,18 @@
-# Managing Dependencies
+# Dependencies
 
-There are three independent things going on when Kinetic runs your job:
-
-1. **Dependency discovery** — Kinetic figures out which packages your
-   project needs by reading `requirements.txt` or `pyproject.toml` from
-   your [entry directory](packaging.md#the-package-root) or from a
-   directory above it.
-2. **Container mode choice** — those dependencies either get baked into
-   a custom image (bundled mode), installed at pod startup (prebuilt
-   mode), or ignored entirely (custom image mode). See
-   [Execution Modes](execution_modes.md).
-3. **JAX filtering** — accelerator runtime packages (`jax`, `jaxlib`,
-   `libtpu`) are filtered out before install so they don't shadow the
-   hardware-correct versions in the container.
-
-This page focuses on (1) and (3). (2) lives on its own page:
-[Execution Modes](execution_modes.md).
+Kinetic reads one dependency file for each job: a `requirements.txt` or a
+`pyproject.toml`. Kinetic installs the packages in that file, and your
+function can import them on the pod. This page explains how Kinetic finds
+the file and which lines Kinetic filters. It also explains how to install
+packages from a private index, and lists the pitfalls that cause a missing
+import on the pod. The container image mode decides where the packages
+install: in the image at build time, or in the pod at start. See
+[Container Images](containers.md) for that choice.
 
 ## A first run
 
-Drop a `requirements.txt` next to your script and Kinetic picks it up
-automatically:
+Put a `requirements.txt` next to your script. Kinetic finds the file
+without configuration:
 
 ```text
 # requirements.txt
@@ -30,44 +22,49 @@ pandas
 ```
 
 ```python
-@kinetic.run(accelerator="tpu-v6e-8")
+@kinetic.run(accelerator="tpu-v5litepod-4")
 def train():
-  import pandas as pd  # installed automatically on the remote
+  import pandas as pd  # installed on the pod
 
   ...
 ```
 
-`pyproject.toml` works equally well — Kinetic reads
-`[project.dependencies]`. If both files exist, `requirements.txt` wins.
+A `pyproject.toml` works too. Kinetic reads the `[project.dependencies]`
+list from that file. If both files are in the same directory, Kinetic
+uses `requirements.txt`.
 
 :::{tip}
 **Recommended defaults:**
 
-- Pin only the libraries you actually depend on. The fewer packages, the
-  faster your image builds (or your prebuilt-mode pod start).
-- Don't pin `jax`, `jaxlib`, `libtpu`, or any other accelerator runtime
-  — Kinetic filters them out and uses the version in the container.
-- Use a `pyproject.toml` if you already have one for local development
-  rather than maintaining a separate `requirements.txt`.
+- List only the packages that your function imports. A short list makes
+  the image build faster.
+- Do not pin `jax`, `jaxlib`, `libtpu`, or `libtpu-nightly`. Kinetic
+  filters those lines and installs the JAX version that matches the
+  accelerator.
+- If you already have a `pyproject.toml` for local development, use that
+  file. You do not need a separate `requirements.txt`.
 :::
 
 ## How discovery works
 
-When you call a decorated function, Kinetic starts at the entry
-directory. Kinetic then walks **up** one directory at a time. At each
-directory, Kinetic does these steps:
+When you call a decorated function, Kinetic starts at the
+[entry directory](packaging.md#the-package-root): the directory of the
+module file that defines the function. Kinetic then walks **up** one
+directory at a time. At each directory, Kinetic does these steps:
 
-1. If a file with the name `requirements.txt` is there, use that file.
-2. If not, and a file with the name `pyproject.toml` is there, read
-   `[project.dependencies]` from that file.
-3. If not, walk up one directory and do the steps again.
+1. If a file with the name `requirements.txt` is in the directory,
+   Kinetic uses that file.
+2. If not, and a file with the name `pyproject.toml` is in the directory,
+   Kinetic uses that file and reads `[project.dependencies]` from it.
+3. If neither file is in the directory, Kinetic moves up one directory
+   and does the steps again.
 
 Kinetic examines files only. If a directory has the name
 `requirements.txt` or `pyproject.toml`, Kinetic ignores that directory
 and continues the walk.
 
-The walk has bounds, so that it cannot leave your project and take a
-foreign file:
+The walk has bounds, so that Kinetic does not use a file from outside
+your project:
 
 - Kinetic stops after it examines the first directory that holds a `.git`
   entry. The entry can be a directory or a file, because a git worktree
@@ -76,90 +73,110 @@ foreign file:
 - Kinetic stops at your home directory and at the root of the file
   system. Kinetic examines these directories too.
 
-If Kinetic finds no dependency file, the job gets only the packages of the
-base image.
+If Kinetic finds no dependency file, the pod gets only the packages that
+Kinetic installs in every image: JAX, Keras, `cloudpickle`,
+`google-cloud-storage`, and Kinetic.
 
-Kinetic writes the name of the file that it selected into the log
-(`Using dependency file: ...`) on each submit. If the installed packages
-are not the packages that you expected, read this log line first. If both
-files are in the selected directory, the log also names the file that
-Kinetic selected. Kinetic also logs a warning when it finds no `.git`
-marker and the selected file is not in your entry directory. Kinetic thus
-never takes a foreign file without a message.
+Kinetic writes the name of the selected file into the log on each submit:
+`Using dependency file: ...`. If the installed packages are not the
+packages that you expected, read this log line first. If both files are
+in the selected directory, the log also names the file that Kinetic
+selected. Kinetic logs a warning when it finds no `.git` entry and the
+selected file is not in your entry directory. The log therefore always
+shows when Kinetic uses a file from outside your entry directory.
 
 :::{warning}
-A `pyproject.toml` file with no `[project.dependencies]` table still stops
-the walk. If your dependencies are in a `requirements.txt` file above it,
-Kinetic does not find them. Kinetic logs a warning that the selected file
-declares no dependencies, and that the job will get only the base-image
-packages. Move or copy your dependency file into your entry directory.
+A `pyproject.toml` file with no `[project.dependencies]` list still stops
+the walk. If your dependencies are in a `requirements.txt` file above
+that directory, Kinetic does not find them. Kinetic logs a warning that
+the selected file declares no dependencies, and that the pod gets only
+the packages that Kinetic installs in every image. Move or copy your
+dependency file into your entry directory.
 
-Kinetic reads `[project.dependencies]` only. Kinetic logs a warning when
-it finds dependencies in `[tool.poetry.dependencies]`, in
-`[project.optional-dependencies]`, in `[dependency-groups]`, or under
-`dynamic = ["dependencies"]`.
+Kinetic reads `[project.dependencies]` only. If that list is empty or
+absent, Kinetic looks for dependencies in `[tool.poetry.dependencies]`,
+`[project.optional-dependencies]`, `[dependency-groups]`, and
+`dynamic = ["dependencies"]`. If Kinetic finds any of those, Kinetic logs
+a warning that names the tables. If `[project.dependencies]` is not
+empty, Kinetic installs that list and ignores the other tables without a
+warning.
 :::
 
 Kinetic ships only the [package root](packaging.md) in `context.zip`.
-Kinetic can thus select a dependency file above the package root. Kinetic
-installs the packages from that file, but the directory of that file is
-not on the pod.
+Kinetic can therefore select a dependency file above the package root.
+Kinetic installs the packages from that file, but the directory of that
+file is not on the pod.
 
-The image build and the pod see the generated requirements file alone.
-A line that points to a path on your machine (`-r base.txt`, `-e .`, or
-`./local-wheel`) thus cannot resolve. In prebuilt mode, Kinetic refuses
-such a line at submit time and names the line that it refuses. In bundled
-mode, Kinetic does not make this check, and the install fails inside Cloud
-Build instead.
+## What Kinetic does with the file
 
-In bundled mode, the discovered file is hashed and used as part of the
-image cache key — change the file, and the next run rebuilds. In
-prebuilt mode, the same file is uploaded and installed at pod startup.
-In custom image mode, the file is ignored entirely.
+Kinetic logs the selected file. Kinetic then filters the content (see
+[JAX and accelerator runtimes](#jax-and-accelerator-runtimes)), hashes
+the filtered content into the image tag, and writes the filtered content
+to a generated `requirements.txt` for Cloud Build. A change to the
+filtered content causes a new image build on the next run. The build
+sees the generated file alone. A line that points to a path on your
+machine (`-r base.txt`, `-e .`, or `./local-wheel`) therefore cannot
+resolve, and the install fails inside Cloud Build.
+
+The other [container image modes](containers.md) change where the
+install happens. The prebuilt mode installs a generated file on the pod
+at start, and rejects a local path line at submit time. A custom image
+ignores the dependency file.
 
 ## JAX and accelerator runtimes
 
-Kinetic's bundled and prebuilt images already have `jax`, `jaxlib`, and
-the right accelerator backend (`libtpu` on TPU, CUDA libs on GPU)
-installed and pinned to versions that match the container. To prevent
-your `requirements.txt` from clobbering that, Kinetic strips these
-entries before install:
+The image that Kinetic builds already contains `jax`, `jaxlib`, and the
+runtime for the accelerator category: `libtpu` on TPU, or the CUDA
+libraries on GPU. To prevent your dependency file from replacing that
+installation, Kinetic removes these entries before the install:
 
 - `jax`
 - `jaxlib`
 - `libtpu`
 - `libtpu-nightly`
 
-If you have a specific reason to override the in-container JAX —
-testing a new release, reproducing a bug — append `# kn:keep` to the
-line:
+Kinetic logs a warning for each removed line. The warning names the
+package and tells you how to keep the line.
+
+If you must override the JAX version, for example to test a new release,
+append `# kn:keep` to the line:
 
 ```text
 jax==0.4.25 # kn:keep
 jaxlib==0.4.25 # kn:keep
 ```
 
-This works in `requirements.txt`. Use it sparingly; getting JAX +
-`jaxlib` + accelerator runtime versions to line up by hand is a known
-source of obscure crashes.
+The marker works in `requirements.txt`. Use the marker with care. A
+mismatch between `jax`, `jaxlib`, and the accelerator runtime is a common
+cause of crashes that are hard to diagnose.
+
+:::{note}
+Kinetic filters physical lines for the image build. If a filtered `jax`
+entry continues onto more lines with a backslash, the continuation lines
+stay in the file and can break the install. The output of
+`pip-compile --generate-hashes` has such lines. Keep each entry on one
+line.
+:::
 
 ## Private packages
 
-Bundled-mode builds install your dependencies inside Cloud Build. Cloud
-Build does not inherit your local `pip.conf`, environment variables, or
-shell credentials, so anything the installer needs in order to find or
-authenticate to a private index has to be present in the project source
-that gets uploaded to the build.
+Cloud Build installs your dependencies into the image. Cloud Build
+never receives your project source. The build context holds exactly three
+things: the generated Dockerfile, the Kinetic runner script, and the
+generated `requirements.txt`. A `pip.conf`, an environment variable, or a
+credential on your machine or in your project tree does not reach the
+build. The only way to tell the installer about a private index is a line
+in the dependency file itself.
 
-You have two practical options:
+You have two options:
 
 ::::{tab-set}
 
-:::{tab-item} Bundled mode with an index URL
+:::{tab-item} An index URL in requirements.txt
 
-Add `--index-url` or `--extra-index-url` as a line in
-`requirements.txt`. The installer reads these directives and uses them
-when resolving every package in the file:
+Add `--index-url` or `--extra-index-url` as a line in `requirements.txt`.
+The installer reads these directives and uses them for every package in
+the file:
 
 ```text
 --extra-index-url https://my-org-private-index.example.com/simple
@@ -167,59 +184,66 @@ my-private-package==1.2.3
 some-public-dep==2.0.0
 ```
 
-This works without extra setup if the index is publicly reachable
-(no auth required), or if it sits behind network ACLs that the Cloud
-Build pool already satisfies (for example, a GCP-internal Artifact
-Registry repo that the build service account has read access to).
+This option does not work in a `pyproject.toml`, because `[project.dependencies]` holds
+package specifiers only. This option needs an index that requires no
+credentials. Examples: a public index, or an index that the Cloud Build
+worker and the pod can reach through network rules alone.
 :::
 
-:::{tab-item} Custom image mode
+:::{tab-item} A custom image
 
 If your private packages need credentials at install time, system
-libraries, or unusual build flags, prebuild a container image with
-them installed and pass it as `container_image="<your-image-uri>"`.
-This gives you full control over the build environment, including
-`pip.conf`, secret mounts, and `gcloud` authentication. See
-[Container Images](containers.md).
+libraries, or special build flags, build a container image that contains
+those packages. Pass the image as `container_image="<your-image-uri>"`.
+You control the build environment: `pip.conf`, secret mounts, and
+`gcloud` authentication. See
+[Container Images](containers.md#custom-image-mode).
 :::
 
 ::::
 
 :::{warning}
-Avoid embedding secrets in `requirements.txt`
-(`https://user:token@host/...`); the file is uploaded to GCS and used
-as part of the build context, so any credentials it contains will end
-up in build logs and cached artifacts.
+Do not put a secret into `requirements.txt`, for example
+`https://user:token@host/...`. Kinetic uploads the generated
+requirements file to the builds bucket as part of the Cloud Build source
+(or to the jobs bucket in the prebuilt mode). Anyone with read access to
+those buckets or to the build can read the token.
 :::
 
 ## Common dependency pitfalls
 
-- **Pinning `jax` without `# kn:keep`** — the pin is silently dropped
-  and you get the in-container version anyway. If you actually want a
-  pin, use `# kn:keep`. If you don't, drop the line.
-- **Listing TensorFlow alongside JAX** — both ship their own copy of
-  the accelerator runtime. They can co-exist, but on TPU you typically
-  want only one. If `tf.data` is the only thing you need from
-  TensorFlow, `tensorflow-cpu` is enough and won't fight with `libtpu`.
-- **Forgetting to add a new package locally** — Kinetic only sees what's
-  in `requirements.txt` or `pyproject.toml`. A `pip install` in your
-  shell that isn't reflected in those files won't carry over.
-- **Massive dependency sets** — every `requirements.txt` change forces
-  a bundled rebuild. If your deps churn daily, consider prebuilt mode
-  (after publishing a base image with `kinetic build-image`).
-- **Editable installs (`pip install -e`)** — an editable install does not
-  show in `requirements.txt`, and Kinetic cannot carry it over. Keep the
-  source inside the [package root](packaging.md), which Kinetic packages
-  for you. As an alternative, publish the package and pin a released
-  version. `pip` cannot install a line such as `-e .` on the pod. `pip`
-  installs a line such as `-e git+https://example.com/pkg` correctly,
+- **A `jax` pin without `# kn:keep`.** Kinetic drops the line, logs a
+  warning, and installs the JAX version of the image. If you want the
+  pin, add `# kn:keep`. If you do not want the pin, delete the line.
+- **TensorFlow next to JAX.** The `tensorflow` package can also try to
+  use the TPU, and JAX then cannot open the TPU. If you need TensorFlow
+  for `tf.data` only, install `tensorflow-cpu`. That package does not use
+  the TPU.
+- **A package that you installed locally but did not list.** Kinetic
+  reads `requirements.txt` or `pyproject.toml` only. A package that you
+  installed with `pip install` in your shell, but did not list in one of
+  those files, is not on the pod.
+- **Extras in `pyproject.toml`.** Kinetic reads `[project.dependencies]`
+  only. Packages in `[project.optional-dependencies]` or in
+  `[dependency-groups]` do not install, and Kinetic logs no warning when
+  `[project.dependencies]` is not empty. Move those packages into
+  `[project.dependencies]`, or use a `requirements.txt`.
+- **A large dependency set that changes often.** A change to the
+  dependency file causes a new image build. If your dependencies change
+  many times a day, see [Container Images](containers.md) for a mode that
+  installs at pod start.
+- **An editable install (`pip install -e`).** An editable install does not
+  appear in `requirements.txt`, and Kinetic cannot install it on the pod.
+  Keep the source inside the [package root](packaging.md), which Kinetic
+  ships for you. As an alternative, publish the package and pin a released
+  version. A line such as `-e .` cannot install in the image or on the
+  pod. Kinetic accepts a line such as `-e git+https://example.com/pkg`,
   because that line names a remote source.
-- **Local path references** — the lines `-r other.txt`,
+- **A local path reference.** Examples: `-r other.txt`,
   `-c constraints.txt`, `./wheels/foo.whl`, `file://...`, and
-  `mypkg @ ./vendor` point to paths that do not exist in the image or on
-  the pod. In prebuilt mode, Kinetic refuses these lines at submit time
-  and names the line. In bundled mode, the install fails inside Cloud
-  Build.
+  `mypkg @ ./vendor`. These lines point to paths that do not exist in the
+  image or on the pod. The install fails inside Cloud Build. The prebuilt
+  mode rejects these lines at submit time and names the line.
 
 ## Related pages
 
@@ -234,24 +258,18 @@ The package root, and why the dependency file can sit outside the
 archive.
 :::
 
-:::{grid-item-card} {octicon}`zap;1em` Execution Modes
-:link: execution_modes
-:link-type: doc
-
-Where the discovered deps go.
-:::
-
 :::{grid-item-card} {octicon}`stack;1em` Container Images
 :link: containers
 :link-type: doc
 
-Custom image and base-image workflows.
+Where the packages install: in the image at build time, in the pod at
+start, or in an image that you build.
 :::
 
 :::{grid-item-card} {octicon}`bug;1em` Troubleshooting
 :link: ../troubleshooting
 :link-type: doc
 
-What to check when an import fails on the remote.
+What to check when an import fails on the pod.
 :::
 ::::

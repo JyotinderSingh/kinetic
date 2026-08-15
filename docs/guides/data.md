@@ -1,42 +1,53 @@
 # Working with Data
 
-`kinetic.Data(...)` is the API for getting bytes into your remote function.
-It accepts a local file or directory path, or a `gs://` URI, and resolves
-to a plain filesystem path inside the pod. Your function code only sees
-paths — never URIs, never `Data` objects.
-
-That uniformity is the whole point: you write the same training code
-whether the data started on your laptop, in a GCS bucket, or as a
-FUSE-mounted dataset too large to fit on disk.
+`kinetic.Data(...)` is the API that makes input data available to your
+remote function. It accepts a local file, a local directory, a `gs://`
+Cloud Storage URI, or an `hf://` Hugging Face dataset URI. On the pod,
+Kinetic replaces each `Data` object with a plain filesystem path. Your
+function sees only paths, never URIs and never `Data` objects. This page
+explains the three ways to read data, when to use each way, and the
+limits. The appendix at the end is for contributors.
 
 ## A first example
 
 ```python
+import os
+
 import kinetic
 from kinetic import Data
 
 
 @kinetic.run(accelerator="cpu")
 def process_data(data_path):
-  import os
-
   print(f"Reading from: {data_path}")
   return sorted(os.listdir(data_path))
 
 
-# Local directory
+# A local directory. Kinetic uploads it one time and downloads it to the pod.
 process_data(Data("./my_dataset/"))
 
-# GCS directory — trailing slash signals it's a directory
+# A Cloud Storage directory. The trailing slash marks a directory.
 process_data(Data("gs://my-bucket/training-set/"))
 ```
 
-`Data` works as a function argument, as a value inside a list/dict, and as
-a value in the `volumes={...}` decorator argument:
+The function code is the same for a local directory and for a Cloud
+Storage directory. In both cases `data_path` is a directory on the pod.
+
+## Two ways to pass `Data`
+
+You can pass a `Data` object in two places:
+
+- **As a function argument.** The function receives the path as the
+  argument value. A `Data` object can also sit inside a list, a tuple, or
+  a dict that you pass as an argument. Use this way when the function
+  takes the path explicitly.
+- **In the `volumes={...}` decorator argument.** Kinetic places the data
+  at the mount path that you give. Use this way when your training script
+  reads from a fixed absolute path.
 
 ```python
 @kinetic.run(
-  accelerator="tpu-v5e-4",
+  accelerator="tpu-v5litepod-4",
   volumes={"/data": Data("./dataset/")},
 )
 def train():
@@ -46,74 +57,92 @@ def train():
   return len(df)
 ```
 
-Use `volumes={...}` when your training script has hardcoded absolute
-paths it expects to read from. Pass `Data(...)` as a function argument
-when you'd rather receive the path explicitly.
+The mount path must be an absolute path that starts with `/`. The mount
+path of a volume is a directory. If the `Data` object is a single file,
+the pod places that file inside the mount directory.
 
-## Choosing a data access pattern
+## Choose an access pattern
 
-Three patterns cover almost everything:
+Three patterns cover almost every job:
 
-1. **Downloaded `Data`** (default) — `Data("...")`. Kinetic copies the
-   bytes onto the pod's local disk before your function runs. Reads are
-   fast (local disk), but the pod has to wait for the download to finish.
-2. **FUSE-mounted `Data`** — `Data("gs://...", fuse=True)`. The bucket
-   is mounted lazily; only files you actually `open()` are fetched from
-   GCS. Pod startup is near-instant; per-file reads pay GCS latency.
-3. **Raw `gs://` streaming** — your code uses `tf.io.gfile`,
-   `gcsfs`, or a similar library to talk to GCS directly without
-   `Data(...)`. This bypasses the `Data` abstraction entirely; reach for
-   it only when you have a specific reason to.
+1. **Downloaded `Data`** (the default) — `Data("...")`. Kinetic copies
+   the data to the local disk of the pod before your function starts.
+   Reads are fast, but the pod waits for the download to finish.
+2. **FUSE-mounted `Data`** — `Data("gs://...", fuse=True)`. Kinetic
+   mounts the Cloud Storage prefix with the GCS FUSE CSI driver. The pod
+   does not wait for a download. Each read fetches the bytes from Cloud
+   Storage on demand.
+3. **Direct `gs://` access** — your code reads Cloud Storage with
+   `tf.io.gfile`, `gcsfs`, `tf.data`, `grain`, or a similar library.
+   You pass the URI as a plain string, not as a `Data` object. Kinetic
+   passes that string through unchanged. Use this pattern only when your
+   framework already has a Cloud Storage reader that you want to keep.
 
-Decision table:
+Use this table to select a pattern:
 
-| Dataset size       | Access pattern            | Use                                          |
-| ------------------ | ------------------------- | -------------------------------------------- |
-| Small (<10 GB)     | Read most/all files       | `Data(...)` (downloaded)                     |
-| Small (<10 GB)     | Random access             | `Data(...)` (downloaded)                     |
-| Medium (10–100 GB) | Streaming once-through    | `Data(..., fuse=True)`                       |
-| Medium (10–100 GB) | Random access many epochs | `Data(...)` (downloaded)                     |
-| Large (>100 GB)    | Streaming, sparse subset  | `Data(..., fuse=True)`                       |
-| Large (>100 GB)    | Need indexed shards       | `Data(..., fuse=True)` + `tf.data` / `grain` |
-| Already in GCS     | Any size                  | `Data("gs://...")` (with or without `fuse`)  |
+| Dataset size       | Access                     | Use                                          |
+| ------------------ | -------------------------- | -------------------------------------------- |
+| Small (<10 GB)     | Read most or all files     | `Data(...)` (downloaded)                     |
+| Small (<10 GB)     | Random access              | `Data(...)` (downloaded)                     |
+| Medium (10–100 GB) | Stream one time            | `Data(..., fuse=True)`                       |
+| Medium (10–100 GB) | Random access, many epochs | `Data(...)` (downloaded)                     |
+| Large (>100 GB)    | Stream a sparse subset     | `Data(..., fuse=True)`                       |
+| Large (>100 GB)    | Indexed shards             | `Data(..., fuse=True)` + `tf.data` / `grain` |
+| Already in GCS     | Any size                   | `Data("gs://...")` (with or without `fuse`)  |
 
 :::{tip}
 **Recommended defaults:**
 
-- For small or medium datasets you read every epoch, use plain
-  `Data(...)`. The download cost is paid once at pod startup; subsequent
-  reads are local-disk fast.
-- For datasets that are too large to fit on the pod's disk, or where you
-  only touch a fraction of the files, use `Data("gs://...", fuse=True)`.
-- Wrap GCS data in `Data(...)` even when it is already in GCS so your
-  function uses the same path-based API regardless of source. Note that
-  Kinetic's content-hash-based upload caching applies only to local
-  data; GCS-hosted `Data` is passed through by URI without rehashing or
-  re-uploading.
+- For a small or medium dataset that you read every epoch, use plain
+  `Data(...)`. The pod downloads the data one time at start. All later
+  reads come from the local disk.
+- For a dataset that does not fit on the disk of the pod, use
+  `Data("gs://...", fuse=True)`. Also use `fuse=True` for a dataset where
+  you read only a fraction of the files.
+- Wrap Cloud Storage data in `Data(...)` even when the data is already in
+  a bucket. Your function then uses the same path-based API for every
+  source. Kinetic passes a `gs://` `Data` object through by URI. Kinetic
+  does not hash it and does not upload it. The upload cache applies only
+  to local data.
+:::
+
+:::{note}
+The pod reads Cloud Storage as the node service account of the cluster,
+`kn-{cluster}-nodes@{project}.iam.gserviceaccount.com`. That account can
+read the jobs bucket. For a bucket that `kinetic up` did not create,
+grant that account the `roles/storage.objectViewer` role on the bucket
+before you submit the job. This rule applies to all three patterns.
 :::
 
 ## FUSE mounting
 
 `fuse=True` mounts the data through the
 [GCS FUSE CSI driver](https://cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/cloud-storage-fuse-csi-driver)
-instead of downloading it. Your function still receives a filesystem
-path; reads stream on demand from GCS.
+instead of a download. Your function still receives a filesystem path.
+Reads stream from Cloud Storage on demand.
 
 ```python
 @kinetic.run(
-  accelerator="tpu-v5e-4",
+  accelerator="tpu-v5litepod-4",
   volumes={"/data": Data("gs://my-bucket/imagenet/", fuse=True)},
 )
 def train():
-  # Only files you open() are fetched from GCS
+  # The pod fetches only the files that the function opens.
   ...
 ```
 
-FUSE works with both `volumes={...}` and function arguments, with both
-local paths and GCS URIs. Single files work transparently — the pod sees
-a file path, not a directory:
+FUSE works with `volumes={...}` and with function arguments. FUSE also
+works with a local path: Kinetic uploads the local data one time and
+then mounts the uploaded copy on the pod. A local single file resolves to
+a file path on the pod, not to a directory:
 
 ```python
+import json
+
+import kinetic
+from kinetic import Data
+
+
 @kinetic.run(accelerator="cpu")
 def read_config(config_path):
   with open(config_path) as f:
@@ -123,11 +152,11 @@ def read_config(config_path):
 read_config(Data("./config.json", fuse=True))
 ```
 
-You can mix FUSE-mounted and downloaded data in the same job:
+You can mix FUSE-mounted data and downloaded data in one job:
 
 ```python
 @kinetic.run(
-  accelerator="tpu-v5e-4",
+  accelerator="tpu-v5litepod-4",
   volumes={
     "/data": Data("gs://my-bucket/large-dataset/", fuse=True),
     "/config": Data("./small-config/"),
@@ -136,58 +165,172 @@ You can mix FUSE-mounted and downloaded data in the same job:
 def train(extra_data): ...
 
 
-train(Data("./labels.csv"))  # downloaded function-argument data
+train(Data("./labels.csv"))  # a downloaded function argument
 ```
+
+Two more rules apply to FUSE:
+
+- **A FUSE mount is read-only.** Your function cannot write under a FUSE
+  mount path. Write outputs under `KINETIC_OUTPUT_DIR` instead. See
+  [Outputs and Checkpoints](checkpointing.md).
+- **Kinetic reserves the prefix `/_kinetic/fuse-data/`.** Kinetic mounts
+  FUSE function arguments below that prefix. A `volumes` key below that
+  prefix raises a `ValueError` at submit time.
 
 :::{admonition} Prerequisites
 :class: important
 
-FUSE mounting needs the GCS FUSE CSI driver addon on
-the GKE cluster. `kinetic up` enables it by default.
+FUSE mounting needs the GCS FUSE CSI driver addon on the GKE cluster.
+`kinetic up` enables the addon by default.
 :::
 
 :::{seealso}
-For a runnable end-to-end walkthrough covering volume mounts, single
-files, multiple FUSE volumes, and mixed FUSE/downloaded data in the same
-job, see
+For a runnable script that covers volume mounts, single files, many FUSE
+volumes, and mixed FUSE and downloaded data in one job, see
 [`examples/example_fuse.py`](https://github.com/keras-team/kinetic/blob/main/examples/example_fuse.py).
 :::
 
-## How it caches
+## Hugging Face datasets
 
-Local data is content-addressed: identical bytes upload only once,
-regardless of how many jobs reference them. SHA-256 of the contents
-becomes the cache key, and re-runs with unchanged data skip the upload
-entirely.
+`Data` also accepts an `hf://` URI. The pod downloads the dataset with
+the `datasets` library and saves it to a local directory. Your function
+receives that directory path and loads it with `datasets.load_from_disk`.
 
-This also means files inside your project root that you wrap in
-`Data(...)` are automatically excluded from the per-job `context.zip`
-payload — no redundant upload of the same bytes.
+```python
+import kinetic
+from kinetic import Data
+
+
+@kinetic.run(accelerator="tpu-v5litepod-4")
+def train(dataset_path):
+  from datasets import load_from_disk
+
+  ds = load_from_disk(dataset_path)
+  return len(ds)
+
+
+train(Data("hf://imdb?split=train"))
+```
+
+Three rules apply to `hf://` URIs:
+
+- The dependency file of your project must list `datasets`. Kinetic does
+  not install it for you. See [Dependencies](dependencies.md).
+- The query string accepts `split`, `config_name`, and `revision`, for
+  example `hf://user/repo?config_name=reviews&split=train`.
+- `Data` rejects `fuse=True` with an `hf://` URI. `Data` raises a
+  `ValueError`.
+
+If the dataset repository runs its own loading code, pass
+`Data("hf://user/repo", hf_trust_remote_code=True)`. The pod then runs
+code from that repository, so use this option only for a repository that
+you trust. For a gated or private dataset, forward your token to the pod
+with `capture_env_vars=["HF_TOKEN"]`. The `datasets` library reads
+`HF_TOKEN` from the environment of the pod. Kinetic itself does not read
+the token. See [Forward Environment Variables](env_vars.md).
+
+:::{seealso}
+For a runnable script that loads a public Hugging Face dataset with
+`config_name` and `split`, see
+[`examples/hf_dataset_demo.py`](https://github.com/keras-team/kinetic/blob/main/examples/hf_dataset_demo.py).
+:::
+
+## Limits and pitfalls
+
+:::{warning}
+**Kinetic does not support a single Cloud Storage object today.**
+`Data("gs://my-bucket/dir/file.h5")`, without a trailing slash, does not
+give your function that file. The download path finds nothing, and the
+function receives an empty directory. The FUSE path mounts the parent
+prefix and can return a different file from the same prefix. Do one of
+these two things instead:
+
+- Point at the directory with a trailing slash:
+  `Data("gs://my-bucket/dir/")`. Then open `file.h5` inside the path
+  that your function receives.
+- Upload the file from your machine: `Data("./file.h5")`. A local single
+  file resolves to a file path on the pod.
+:::
+
+Other limits:
+
+- **A `gs://` directory needs a trailing slash.** Kinetic reads
+  `Data("gs://my-bucket/dataset/")` as a directory and
+  `Data("gs://my-bucket/dataset")` as a single object. Kinetic logs a
+  warning when a `gs://` path has no trailing slash and the last segment
+  has no file extension.
+- **A `Data` instance is a snapshot.** Kinetic hashes the local files one
+  time per `Data` instance and caches the hash. If you edit the files and
+  submit the same instance again, the job uses the old upload. Create a
+  new `Data` object to upload the changed files.
+- **A `Data` object cannot be a set member or a dict key.** Before the
+  upload, Kinetic replaces each `Data` object with a dict, and a dict is
+  not hashable. Kinetic raises a `ValueError` at submit time for a `Data`
+  object inside a set or a frozenset. Kinetic raises the same error for a
+  `Data` object that is a dict key. Pass the `Data` object as its own
+  argument, or inside a list, a tuple, or a dict value.
+- **Kinetic finds `Data` objects only in containers.** Kinetic walks
+  lists, tuples, dicts, and their subclasses. Kinetic does not find a
+  `Data` object that you store as an attribute of your own class.
+- **Large local data logs a warning.** If a local `Data` object is larger
+  than 10 GB, Kinetic logs a warning before the upload. The warning
+  recommends a `gs://` URI with framework-native I/O.
+
+## How Kinetic caches local data
+
+Kinetic uploads local data one time and reuses the upload for every later
+job that references the same data. The cache key is a SHA-256 hash of
+the relative path and the contents of every file. The hash also includes
+a marker that identifies a single file or a directory. Two consequences
+follow:
+
+- A second run with the same directory skips the upload. Kinetic logs
+  `Data cache hit` and passes the existing Cloud Storage location.
+- A rename or a move of a file inside the directory changes the hash.
+  Kinetic uploads the directory again.
+
+Kinetic stores the upload in the jobs bucket at
+`gs://{jobs bucket}/default/data-cache/{hash}/`. The `default` segment is
+a literal string, not the Kubernetes namespace of your profile. The jobs
+bucket deletes objects that are older than 30 days, so the cache is valid
+for 30 days after the upload.
+
+Kinetic also excludes a local `Data` path from the source archive of the
+job when that path sits inside the package root. Kinetic uploads those
+files one time, through the data cache. See
+[What Ships to the Pod](packaging.md).
 
 ## Related pages
 
 ::::{grid} 1 1 2 2
 :gutter: 3
 
-:::{grid-item-card} {octicon}`history;1em` Checkpointing
+:::{grid-item-card} {octicon}`history;1em` Outputs and Checkpoints
 :link: checkpointing
 :link-type: doc
 
-Durable outputs and `KINETIC_OUTPUT_DIR`.
+Write durable outputs and checkpoints under `KINETIC_OUTPUT_DIR`.
+:::
+
+:::{grid-item-card} {octicon}`package;1em` What Ships to the Pod
+:link: packaging
+:link-type: doc
+
+The package root, the source archive, and how `Data` paths are excluded.
+:::
+
+:::{grid-item-card} {octicon}`key;1em` Forward Environment Variables
+:link: env_vars
+:link-type: doc
+
+Copy tokens such as `HF_TOKEN` from your shell to the pod.
 :::
 
 :::{grid-item-card} {octicon}`beaker;1em` Examples
 :link: ../examples
 :link-type: doc
 
-Walks through the Data API end-to-end.
-:::
-
-:::{grid-item-card} {octicon}`graph;1em` Cost Optimization
-:link: cost_optimization
-:link-type: doc
-
-FUSE vs download tradeoffs for repeated jobs.
+Runnable scripts for the `Data` API and for FUSE mounts.
 :::
 ::::
 
@@ -195,19 +338,19 @@ FUSE vs download tradeoffs for repeated jobs.
 
 ## Appendix: implementation internals
 
-The rest of this page is for contributors and people debugging
-data-related issues. End users do not need to read it.
+This appendix is for contributors and for people who debug data issues.
+Users do not need to read it.
 
 ### `Data` reference serialization
 
-`Data` objects can't be sent directly to the remote pod. During
-`_prepare_artifacts()`, each `Data` is uploaded to GCS and replaced with
-a serializable `__data_ref__` dict:
+A `Data` object does not travel to the pod. During `_prepare_artifacts()`,
+Kinetic uploads each local `Data` object and replaces every `Data` object
+with a serializable `__data_ref__` dict:
 
 ```python
 {
   "__data_ref__": True,
-  "uri": "gs://bucket/namespace/data-cache/abc123",
+  "uri": "gs://bucket/default/data-cache/abc123",
   "is_dir": True,
   "mount_path": "/data",  # None unless the Data is a volume or uses FUSE
   "fuse": False,  # True when fuse=True was passed
@@ -229,7 +372,7 @@ Kinetic sets `mount_path` for two kinds of `Data`:
 
 A plain function argument gets `mount_path: None`.
 
-On the remote pod, `resolve_data_refs()` in `remote_runner.py` walks the
+On the pod, `resolve_data_refs()` in `remote_runner.py` walks the
 deserialized args and kwargs and replaces these dicts with local
 filesystem paths. The walk uses an identity memo. One `Data` object that
 you pass two times thus resolves one time. The aliasing between your
@@ -243,47 +386,71 @@ hash the replacement dict:
 - A `Data` object inside a set or a frozenset.
 - A `Data` object used as a dictionary key.
 
+For a downloaded reference, `resolve_data_refs()` returns a directory
+path. If the reference is not a directory and the download produced
+exactly one file, it returns the path of that file. For an `hf://`
+reference, `_download_hf_data()` calls `datasets.load_dataset()` with the
+`split`, `config_name`, and `revision` query parameters and then calls
+`save_to_disk()` on the target directory.
+
 ### Upload and caching pipeline
 
-Local data is uploaded to `gs://{bucket}/{namespace}/data-cache/{hash}/`,
-where `{hash}` is a SHA-256 computed over sorted file contents. The flow:
+`upload_data()` in `kinetic/utils/storage.py` uploads local data to
+`gs://{jobs bucket}/default/data-cache/{hash}/`. The function has a
+`namespace_prefix` parameter with the default value `"default"`. The
+callers in `execution.py` do not pass that parameter, so the prefix is
+always the literal `default`. The flow:
 
 :::{container} kinetic-steps
-1. **Compute content hash.**
-   Deterministic: sorted DFS order, per-file SHA-256, then combined.
+1. **Compute the content hash.** `Data.content_hash()` hashes each file
+   as SHA-256 of `relpath + "\0" + contents`, in sorted DFS order. It then
+   combines the per-file digests under a `dir:` or `file:` prefix. The
+   instance caches the result.
 
-2. **Check for a sentinel blob** at `{namespace}/data-markers/{hash}` — if
-   present, skip upload.
+2. **Check for a sentinel blob** at `default/data-markers/{hash}`. If
+   the blob exists, skip the upload.
 
-3. **Upload files** preserving directory structure under the hash prefix.
+3. **Upload the files** under the hash prefix. The directory structure
+   is preserved.
 
-4. **Write the sentinel blob** last to signal upload-complete.
+4. **Write the sentinel blob** last. The blob signals that the upload is
+   complete.
 :::
 
-For single files, the blob is stored at `{hash}/{filename}`. For
-directories, the full tree is preserved under `{hash}/`. The returned
-GCS URI always points to the hash prefix directory, not individual files.
+For a single file, the blob is stored at `{hash}/{filename}`. For a
+directory, the full tree is preserved under `{hash}/`. The returned Cloud
+Storage URI always points to the hash prefix directory, not to a file.
+For a `gs://` or `hf://` `Data` object, `upload_data()` returns the
+original URI without an upload.
 
 ### FUSE mount implementation
 
-GCS FUSE can only mount directories, not individual files. The system
-handles this through several layers:
+GCS FUSE mounts directories, not single files. Three layers handle
+single files:
 
-**Volume spec construction** (`execution.py`): for `fuse=True` Data, a
-FUSE volume spec is built with `gcs_uri`, `mount_path`, `is_dir`, and
-`read_only`. Specs live on `ctx.fuse_volume_specs` and pass through to
-the backend.
+**Volume spec construction** (`execution.py`): for a `fuse=True` `Data`
+object, Kinetic builds a FUSE volume spec. The spec has the keys
+`gcs_uri`, `mount_path`, `is_dir`, and `read_only`. `read_only` is always
+`True`. The specs live on `ctx.fuse_volume_specs` and pass through to the
+backend.
 
 **URI adjustment for uploaded single files:** `upload_data()` returns a
-directory-level URI (`gs://bucket/ns/data-cache/{hash}`) since the hash
-prefix is a directory. For FUSE single-file mounts, `_fuse_gcs_uri()`
-appends the original filename (`gs://bucket/ns/data-cache/{hash}/config.json`)
-so the `only-dir` mount option scopes to the hash directory rather than
-the entire `data-cache/` tree. The data ref retains the directory-level
-URI for download compatibility.
+directory-level URI (`gs://bucket/default/data-cache/{hash}`), because
+the hash prefix is a directory. For a FUSE single-file mount of a local
+file, `_fuse_gcs_uri()` appends the original filename
+(`gs://bucket/default/data-cache/{hash}/config.json`). The `only-dir`
+mount option then scopes the mount to the hash directory and not to the
+whole `data-cache/` tree. The data ref keeps the directory-level URI. A
+`gs://` URI passes through `_fuse_gcs_uri()` unchanged.
 
-**K8s volume generation:** each spec becomes an inline ephemeral CSI
-volume. The `only-dir` mount option scopes the mount to a specific GCS
-prefix. For single files (`is_dir=False`), the parent directory is
-mounted. The pod receives a `gke-gcsfuse/volumes: "true"` annotation to
-trigger the GCS FUSE sidecar injection.
+**Kubernetes volume generation** (`k8s_utils.py`): each spec becomes an
+inline ephemeral CSI volume with the `implicit-dirs` mount option. The
+`only-dir` mount option scopes the mount to one Cloud Storage prefix. For
+a single file (`is_dir=False`), Kinetic mounts the parent directory. The
+pod receives a `gke-gcsfuse/volumes: "true"` annotation, and GKE then
+injects the GCS FUSE sidecar. On the pod, `_resolve_fuse_single_file()`
+returns the first entry of the mount directory. That result is correct
+for an uploaded local file, which is alone under its hash prefix. For a
+`gs://` single object, the parent prefix can hold many objects, and the
+first entry can be a different file. That is the reason for the
+limitation in the [Limits and pitfalls](#limits-and-pitfalls) section.

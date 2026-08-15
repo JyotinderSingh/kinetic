@@ -1,149 +1,183 @@
 # Configuration
 
-Kinetic uses environment variables, decorator arguments, CLI flags, and
-optionally [named profiles](guides/profiles.md) for configuration. This
-page is the source of truth for what each one does, what the defaults
-are, and how they come together when they disagree.
+This page is the reference for every setting that Kinetic reads: where
+each setting can come from, which source wins, and what the default is.
+For the everyday workflow, see [Profiles](guides/profiles.md).
 
-:::{tip}
-If you work with more than one cluster or project, consider saving
-those combinations as [profiles](guides/profiles.md) — they remove the
-need to re-export `KINETIC_*` env vars each time you switch.
-:::
+## The four sources
 
-## Environment variables
+Kinetic reads a setting from up to four sources. The first source that
+has a value wins:
 
-| Variable                     | Used by                   | Default                          | Description                                                                                                                                                  |
-| ---------------------------- | ------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `KINETIC_PROJECT`            | CLI + decorators          | _(required)_                     | GCP project ID. Falls back to `GOOGLE_CLOUD_PROJECT` if unset.                                                                                               |
-| `KINETIC_ZONE`               | CLI + decorators          | `us-central1-a`                  | GCP zone for jobs and clusters.                                                                                                                              |
-| `KINETIC_CLUSTER`            | CLI + decorators          | `kinetic-cluster`                | GKE cluster name.                                                                                                                                            |
-| `KINETIC_NAMESPACE`          | CLI + decorators          | `default`                        | Kubernetes namespace.                                                                                                                                        |
-| `KINETIC_BASE_IMAGE_REPO`    | Decorator (prebuilt mode) | `kinetic`                        | Repo for prebuilt base images. See [Execution Modes](guides/execution_modes.md).                                                                             |
-| `KINETIC_OUTPUT_DIR`         | CLI + remote pod          | `gs://{bucket}/outputs/{job_id}` | Per-job durable artifact prefix. See [Checkpointing](guides/checkpointing.md).                                                                               |
-| `KINETIC_RESERVATION`        | `kinetic pool add`        | _(unset)_                        | GCP capacity reservation to consume. Pool-level config, not a per-job setting.                                                                               |
-| `KINETIC_LOG_LEVEL`          | Library                   | `INFO`                           | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `FATAL`.                                                                                                                |
-| `KINETIC_DEBUG_WAIT_TIMEOUT` | Library + remote pod      | `600`                            | Seconds the remote pod waits for a debugger client to attach when `debug=True`. Applies on both sides (local `debug_attach()` and the pod's debugpy server). |
-| `KINETIC_PACKAGE_ROOT`       | Library (submit)          | _(auto-detected)_                | Set this variable to the directory that Kinetic puts into `context.zip`. The directory must exist. The directory must also contain the directory that defines your function. If one of these conditions is not true, Kinetic raises a `ValueError` at submit time. See [What Ships to the Pod](guides/packaging.md). |
-| `KINETIC_NO_DEFAULT_EXCLUDES`| Library (submit)          | _(unset)_                        | Set this variable to `1` to turn the default exclusions off. Kinetic then puts `.venv`, `node_modules`, and the cache directories into `context.zip`. Kinetic always excludes `.git` and `__pycache__`.                                                             |
-| `KINETIC_CONTEXT_SIZE_WARN_MB`| Library (submit)         | `100`                            | Warning threshold in megabytes for `context.zip`. Above the threshold, Kinetic logs a warning and lists the five largest files. Set the value to `0` to turn the warning off.                                                                                    |
-| `KINETIC_PAYLOAD_SIZE_WARN_MB`| Library (submit)         | `50`                             | Warning threshold in megabytes for `payload.pkl`. Above the threshold, Kinetic logs a warning about the arguments and the module-level globals that it captured by value. Set the value to `0` to turn the warning off.                                                                    |
+1. **A decorator argument or a CLI flag.** For example,
+   `@kinetic.run(project="p")` or `kinetic status --project p`. Use these
+   for a one-off override in one call.
+2. **A `KINETIC_*` environment variable.** For example,
+   `KINETIC_PROJECT=p`. Use these for one shell session, or in CI.
+3. **The active profile.** A profile stores the project, the zone, the
+   cluster, and the namespace. `kinetic init` creates the first profile.
+   This is the source that you set one time.
+4. **The built-in default.**
 
-Set them in your shell profile (`~/.bashrc`, `~/.zshrc`) so they
-persist across sessions:
+Profiles cover only the four target settings. The other settings in this
+page come from a decorator argument, a flag, an environment variable, or
+the default.
 
-```bash
-export KINETIC_PROJECT="my-gcp-project-id"
-export KINETIC_ZONE="us-central1-a"
-```
+## Precedence table
 
-## Precedence
+| Setting | Decorator argument | CLI flag | Environment variable | Active profile | Built-in default |
+| ------- | ------------------ | -------- | -------------------- | -------------- | ---------------- |
+| Project | `project=` | `--project` | `KINETIC_PROJECT` | `project` | `GOOGLE_CLOUD_PROJECT` (Python API only), else required |
+| Zone | `zone=` | `--zone` | `KINETIC_ZONE` | `zone` | `us-central1-a` |
+| Cluster | `cluster=` | `--cluster` | `KINETIC_CLUSTER` | `cluster` | `kinetic-cluster` |
+| Namespace | `namespace=` | `--namespace` (`kinetic jobs list`, `kinetic init`, `kinetic up`, `kinetic profile create`) | `KINETIC_NAMESPACE` | `namespace` | `default` |
+| Output directory | `output_dir=` | _(none)_ | `KINETIC_OUTPUT_DIR` | _(none)_ | `gs://{jobs bucket}/outputs/{job_id}` |
+| Base image repository | `base_image_repo=` | `kinetic build-image --repo` | `KINETIC_BASE_IMAGE_REPO` | _(none)_ | `kinetic` |
+| Reservation | _(none)_ | `kinetic pool add --reservation` | `KINETIC_RESERVATION` | _(none)_ | _(unset)_ |
+| Profile selection | _(none)_ | `kinetic --profile` | `KINETIC_PROFILE` | the stored `current` | _(none)_ |
 
-When the same setting can come from multiple sources, the highest one
-wins:
-
-| Setting         | Decorator arg      | CLI flag                         | Env var                                         | Active [profile](guides/profiles.md) | Built-in default                 |
-| --------------- | ------------------ | -------------------------------- | ----------------------------------------------- | ------------------------------------ | -------------------------------- |
-| Project         | `project=`         | `--project`                      | `KINETIC_PROJECT` (then `GOOGLE_CLOUD_PROJECT`) | `project`                            | _(required)_                     |
-| Zone            | `zone=`            | `--zone`                         | `KINETIC_ZONE`                                  | `zone`                               | `us-central1-a`                  |
-| Cluster         | `cluster=`         | `--cluster`                      | `KINETIC_CLUSTER`                               | `cluster`                            | `kinetic-cluster`                |
-| Namespace       | `namespace=`       | `--namespace`                    | `KINETIC_NAMESPACE`                             | `namespace`                          | `default`                        |
-| Output dir      | `output_dir=`      | `--output-dir`                   | `KINETIC_OUTPUT_DIR`                            | _(n/a)_                              | `gs://{bucket}/outputs/{job_id}` |
-| Base image repo | `base_image_repo=` | `kinetic build-image --repo`     | `KINETIC_BASE_IMAGE_REPO`                       | _(n/a)_                              | `kinetic`                        |
-| Reservation\*   | _(n/a)_            | `kinetic pool add --reservation` | `KINETIC_RESERVATION`                           | _(n/a)_                              | _(unset)_                        |
-
-\* Reservation is a node-pool-level setting, not a per-job one. You bind
-a reservation to a pool when you create the pool with `kinetic pool add`,
-and any job that lands on that pool consumes it. Because of that there is
-no decorator argument; jobs select pools indirectly via `accelerator=`.
-
-Read left to right: a decorator argument always beats a CLI flag, which
-beats an env var, which beats a profile field, which beats the built-in
-default. Concretely:
+Read each row from left to right. A decorator argument beats a flag,
+which beats an environment variable, which beats the profile, which beats
+the default. For example:
 
 ```python
-@kinetic.run(accelerator="tpu-v6e-8", project="explicit-project")
+@kinetic.run(accelerator="tpu-v5litepod-4", project="explicit-project")
 def train(): ...
 ```
 
-uses `explicit-project` even if `KINETIC_PROJECT` is set to something
-else.
+This job runs in `explicit-project`, even if `KINETIC_PROJECT` and the
+active profile name a different project.
+
+A reservation is a property of a node pool, not of a job. You bind a
+reservation to a pool with `kinetic pool add`, and every job that lands
+on that pool uses it. Jobs select pools through `accelerator=`.
+
+## Environment variables
+
+### Target selection
+
+These four variables have profile equivalents. Set them only for a
+one-off override.
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `KINETIC_PROJECT` | _(none)_ | Google Cloud project ID. Required when no profile is active. The Python API also accepts `GOOGLE_CLOUD_PROJECT`, after the profile. The CLI does not read `GOOGLE_CLOUD_PROJECT`. |
+| `KINETIC_ZONE` | `us-central1-a` | Zone of the cluster. |
+| `KINETIC_CLUSTER` | `kinetic-cluster` | Name of the cluster. |
+| `KINETIC_NAMESPACE` | `default` | Kubernetes namespace for jobs. |
+
+### Profile selection
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `KINETIC_PROFILE` | _(unset)_ | Name of the profile to use for this process. Overrides the stored active profile. Both the CLI and the Python API read it. |
+| `KINETIC_PROFILES_FILE` | `~/.kinetic/profiles.json` | Path of the profile store. |
+
+### Job behavior
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `KINETIC_OUTPUT_DIR` | `gs://{jobs bucket}/outputs/{job_id}` | On your machine before a submit: the output directory for the job. In the pod: the resolved value, always set. See [Outputs and Checkpoints](guides/checkpointing.md). |
+| `KINETIC_BASE_IMAGE_REPO` | `kinetic` | Repository for prebuilt base images. Used only with `container_image="prebuilt"`. See [Container Images](guides/containers.md). |
+| `KINETIC_NO_TTY_DEBUG` | _(unset)_ | Set to `1` to permit a blocking call with `debug=True` when `stdin` is not a terminal. See [Interactive Debugging](guides/debugging.md). |
+
+### Packaging
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `KINETIC_PACKAGE_ROOT` | _(detected)_ | The directory that Kinetic archives into `context.zip`. The directory must exist, and it must be the directory of your function or a parent of it. Otherwise Kinetic raises a `ValueError` at submit time. See [What Ships to the Pod](guides/packaging.md). |
+| `KINETIC_NO_DEFAULT_EXCLUDES` | _(unset)_ | Set to `1` to turn off the default exclusions. Kinetic then archives `.venv`, `node_modules`, and the cache directories. `.git` and `__pycache__` stay excluded. |
+| `KINETIC_CONTEXT_SIZE_WARN_MB` | `100` | Size of `context.zip`, in megabytes, above which Kinetic logs a warning and lists the five largest files. `0` turns the warning off. |
+| `KINETIC_PAYLOAD_SIZE_WARN_MB` | `50` | Size of `payload.pkl`, in megabytes, above which Kinetic logs a warning about the arguments and globals that it captured by value. `0` turns the warning off. |
+
+### CLI only
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `KINETIC_RESERVATION` | _(unset)_ | Capacity reservation for `kinetic pool add`. See [Capacity Reservations](guides/reservations.md). |
+| `KINETIC_FORCE_DESTROY` | `true` | Whether `kinetic down` empties the buckets before it deletes them. `kinetic up --no-force-destroy` stores `false` in the stack. |
+| `KINETIC_LOG_LEVEL` | `INFO` | Log level of the `kinetic` package: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `FATAL`. |
+
+To make an environment variable persist, put the `export` line in your
+shell profile (`~/.bashrc` or `~/.zshrc`). For the target settings,
+prefer a profile.
 
 ## Logging
 
-Kinetic uses `absl-py` for logging. Set `KINETIC_LOG_LEVEL` to control
-verbosity:
+Kinetic logs with `absl-py`. `KINETIC_LOG_LEVEL` sets the level:
 
-- **DEBUG** — packaging details, dependency hashing, build pipeline,
-  GKE submission.
-- **INFO** — major lifecycle milestones (default).
-- **WARNING / ERROR / FATAL** — only the named severity and above.
+- `DEBUG` — packaging details, dependency hashing, the build pipeline,
+  and the Kubernetes submission.
+- `INFO` — the main lifecycle events. This is the default.
+- `WARNING`, `ERROR`, `FATAL` — that level and above only.
 
 ```bash
 export KINETIC_LOG_LEVEL=DEBUG
 ```
 
-## Pulumi state
+## See the resolved values
 
-Kinetic stores its Pulumi state in a Google Cloud Storage bucket
-derived from the GCP project: `gs://{project}-kinetic-state`. The
-bucket is created on first use (idempotent), with **versioning
-enabled** and **uniform bucket-level access**, no public ACL.
-Multiple clusters in one project share the bucket but get separate
-stacks (named `{project}-{cluster}`), so a team running against the
-same GCP project automatically converges on one authoritative state.
+`kinetic config` prints the active profile and, for the project, the
+zone, the cluster, the namespace, and the output directory, the resolved
+value and its source (`KINETIC_*`, `profile`, or `default`). The command
+also prints the state bucket of the project. Run it first when a setting
+does not take effect.
+
+```bash
+kinetic config
+```
+
+`kinetic config` cannot see a CLI flag or a decorator argument, because
+those apply to one call. The other variables in this page do not appear
+in the output. Inspect them with `env | grep KINETIC_`.
+
+## Infrastructure state
+
+The `kinetic` CLI stores its Pulumi state in a Cloud Storage bucket named
+`gs://{project}-kinetic-state`. The first `kinetic up` in a project
+creates the bucket, with versioning and uniform bucket-level access, and
+without a public ACL. All clusters in the project share the bucket. Each
+cluster has its own stack, named `{project}-{cluster}`. A team that works
+in one project therefore sees one authoritative state.
 
 ### IAM
 
-Kinetic uses Application Default Credentials, the same auth path as
-`gcloud`. The first admin to run `kinetic up` for a project needs
-`roles/storage.admin` so the state bucket can be created. Every other
-team member only needs `roles/storage.objectAdmin` on the bucket to
-read and write state.
-
-## Where to look
-
-If a setting isn't behaving the way you expect, `kinetic config` prints
-the resolved value of the most common variables (project, zone,
-cluster, namespace, output dir, and the per-project Pulumi state
-bucket) and where each came from (env var,
-[profile](guides/profiles.md), or default). Run it before reaching
-for `kinetic init`'s troubleshoot path. Variables that aren't shown there
-(`KINETIC_BASE_IMAGE_REPO`, `KINETIC_RESERVATION`, `KINETIC_LOG_LEVEL`,
-`KINETIC_DEBUG_WAIT_TIMEOUT`) can be inspected with `env | grep
-KINETIC_`.
+Kinetic uses Application Default Credentials, the same login path as
+`gcloud`. The first person who runs `kinetic up` in a project needs
+`roles/storage.admin`, because that run creates the state bucket. Every
+other team member needs `roles/storage.objectAdmin` on the bucket to
+read and write the state.
 
 ## Related pages
 
 ::::{grid} 1 1 2 2
 :gutter: 3
 
-:::{grid-item-card} {octicon}`rocket;1em` Getting Started
-:link: getting_started
-:link-type: doc
-
-Sets the canonical `KINETIC_PROJECT` once.
-:::
-
 :::{grid-item-card} {octicon}`stack;1em` Profiles
 :link: guides/profiles
 :link-type: doc
 
-Named bundles for project/zone/cluster/namespace; the ergonomic
-alternative to re-exporting env vars when you target multiple clusters.
+The everyday way to set the project, zone, cluster, and namespace.
+:::
+
+:::{grid-item-card} {octicon}`server;1em` Clusters and Node Pools
+:link: guides/clusters
+:link-type: doc
+
+What `kinetic up` creates, and how a team shares it.
 :::
 
 :::{grid-item-card} {octicon}`terminal;1em` CLI Reference
 :link: cli
 :link-type: doc
 
-Generated reference for every flag.
+Generated reference for every command and flag.
 :::
 
 :::{grid-item-card} {octicon}`bug;1em` Troubleshooting
 :link: troubleshooting
 :link-type: doc
 
-What to check when a setting doesn't take effect.
+What to check when a setting does not take effect.
 :::
 ::::

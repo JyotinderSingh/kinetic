@@ -1,19 +1,18 @@
-# Checkpointing and Outputs
+# Outputs and Checkpoints
 
-Long jobs need somewhere durable to write to. Pods come and go — when
-your training script exits, anything that lived only inside the pod's
-filesystem is gone. Kinetic gives you `KINETIC_OUTPUT_DIR`: a per-job
-GCS prefix that survives the pod, so your checkpoints, logs, and final
-artifacts are still there when you come back.
+The filesystem of the pod is temporary. When your function returns, or
+when the pod stops for another reason, every file on the pod is lost.
+Kinetic gives each job an **output directory**: a Cloud Storage prefix
+that stays after the pod stops. The pod sees that prefix as the
+environment variable `KINETIC_OUTPUT_DIR`. This page explains what to
+write where and how to set the output directory. It also explains how to
+resume a training run from a checkpoint and how long the files stay.
 
-This page covers what to write where, how Orbax (or any other library)
-plugs into it, and how cleanup and TTLs work.
+## A first job that writes outputs
 
-## A first checkpointed job
-
-Inside the pod, `KINETIC_OUTPUT_DIR` is already set. Read it and write
-under it. Fall back to a local path when the variable is not present so
-that the same function works when you exercise it locally:
+Kinetic sets `KINETIC_OUTPUT_DIR` in the pod. Read the variable and write
+under that path. If the variable is not present, use a local path. Then
+the same function also works when you call it locally for a test:
 
 ```python
 import os
@@ -23,163 +22,266 @@ import kinetic
 
 @kinetic.run(accelerator="cpu")
 def train():
-  # Remote: KINETIC_OUTPUT_DIR resolves to gs://.../outputs/<job_id>.
-  # Local: fall back to a filesystem path under /tmp so the same code
-  # works when you run the function directly for testing.
+  # Remote: KINETIC_OUTPUT_DIR is gs://.../outputs/<job_id>.
+  # Local: fall back to a path under /tmp for a direct test call.
   output_dir = os.environ.get("KINETIC_OUTPUT_DIR", "/tmp/local_checkpoints")
-  # ... train and write checkpoints/artifacts under output_dir ...
+  # ... train, and write checkpoints and artifacts under output_dir ...
   return f"saved to {output_dir}"
 ```
 
-:::{seealso}
-For full Orbax-managed auto-resume with JAX or Keras, the canonical
-runnable examples live in the repo:
+Every call of `train()` is a new job with a new job ID. By default, the
+output directory contains the job ID, so every call also gets a new,
+empty output directory. That default is correct for a job that runs one
+time. If a second call must find the files of the first call, both calls
+must use the same output directory. A resume from a checkpoint is one
+example. Pass `output_dir=` to the decorator:
 
-- [`examples/example_checkpoint.py`](https://github.com/keras-team/kinetic/blob/main/examples/example_checkpoint.py)
-  — JAX + Orbax with auto-resume.
-- [`examples/example_keras_checkpoint.py`](https://github.com/keras-team/kinetic/blob/main/examples/example_keras_checkpoint.py)
-  — same pattern using `model.get_weights()` / `set_weights()`.
-:::
+```python
+@kinetic.run(accelerator="cpu", output_dir="gs://my-bucket/runs/exp-01")
+def train():
+  ...
+```
 
-## Outputs and checkpoints
+See [Resume a job from a checkpoint](#resume-a-job-from-a-checkpoint)
+below.
 
-A Kinetic job produces three distinct kinds of artifact, each with its
-own storage location and lifecycle:
+## Three kinds of artifact
 
-Artifact              | What it is                             | Where it lives
---------------------- | -------------------------------------- | -------------------------------------------------------------------------------
-Job return value      | The Python value your function returns | Persisted to `gs://{bucket}/{job_id}/result.pkl`, then downloaded to your local process
-Durable outputs       | Files you wrote during the run         | `KINETIC_OUTPUT_DIR` (GCS)
-Resumable checkpoints | Periodic state snapshots for restart   | `KINETIC_OUTPUT_DIR/<your-subdir>` (GCS)
+A Kinetic job produces three kinds of artifact. Each kind has its own
+location and its own lifecycle:
 
-The return value is the right channel for **small** results: a final
-loss, a metric dict, a path string. Large files belong on the output
-dir; checkpoints belong on a stable subpath under the output dir so
-restarts can find them.
+| Artifact | What it is | Where it goes |
+| -------- | ---------- | ------------- |
+| Job return value | The Python value that your function returns | `gs://{jobs bucket}/{job_id}/result.pkl`, then your local process |
+| Durable outputs | Files that you write during the run | `KINETIC_OUTPUT_DIR` in Cloud Storage |
+| Resumable checkpoints | Periodic snapshots of the training state | A fixed subdirectory under `KINETIC_OUTPUT_DIR` |
 
-`KINETIC_OUTPUT_DIR` is set automatically when the job starts. By
-default it resolves to the jobs bucket for your cluster:
+Use the return value for **small** results: a final loss, a dict of
+metrics, a path string. Write large files under the output directory.
+Write checkpoints to a fixed subdirectory under the output directory, so
+that a later run finds them at a known path.
+
+## The default output directory
+
+Kinetic sets `KINETIC_OUTPUT_DIR` when the job starts. By default, the
+variable points to a per-job prefix in the jobs bucket of your cluster:
 
 ```text
 gs://{project}-kn-{cluster}-jobs/outputs/{job_id}
 ```
 
-`{project}` is your GCP project (from `KINETIC_PROJECT`) and `{cluster}`
-is the Kinetic cluster name (from `KINETIC_CLUSTER`, defaulting to
-`kinetic-cluster`). The bucket is created by `kinetic up` and reused
-across all jobs submitted to that cluster.
+`{project}` and `{cluster}` come from the active profile, unless you
+override them for the job. `{job_id}` is the ID of the job, for example
+`job-3f9a1c2b`. `kinetic up` creates the jobs bucket one time, and every
+job on that cluster uses the same bucket.
 
-You can override it per job by passing `output_dir=` to the decorator,
-setting `KINETIC_OUTPUT_DIR` in your local environment before
-submission, or (when inspecting an existing job from the CLI) passing
-`--output-dir` to the relevant `kinetic jobs` subcommand. See the
-precedence table in [Configuration](../configuration.md) for how these
-resolution paths combine.
+The pod runs as the node service account of the cluster,
+`kn-{cluster}-nodes@{project}.iam.gserviceaccount.com`. That account can
+read and write the jobs bucket. It has no access to other buckets unless
+you grant that access.
+
+## Set the output directory
+
+Pass `output_dir="gs://..."` to `@kinetic.run()` to replace the default
+location for a job.
+
+For a script that you cannot edit, export `KINETIC_OUTPUT_DIR` in your
+local shell before you submit the job. Kinetic reads the local variable
+at submit time and passes the value to the pod. The decorator argument
+wins over the local environment variable, and the local environment
+variable wins over the default. See [Configuration](../configuration.md)
+for the full precedence rules. `kinetic config` shows the value of
+`KINETIC_OUTPUT_DIR` if you set the variable in your shell.
+
+You cannot change the output directory from the `kinetic jobs` commands.
+The output directory is a property of the job that you set at submit
+time.
+
+:::{note}
+If `output_dir=` points to a bucket that `kinetic up` did not create, the
+pod cannot write there until you grant access. Give the node service
+account of the cluster the `roles/storage.objectAdmin` role and the
+`roles/storage.legacyBucketReader` role on that bucket:
+
+```bash
+gcloud storage buckets add-iam-policy-binding gs://my-bucket \
+  --member=serviceAccount:kn-kinetic-cluster-nodes@my-project.iam.gserviceaccount.com \
+  --role=roles/storage.objectAdmin
+gcloud storage buckets add-iam-policy-binding gs://my-bucket \
+  --member=serviceAccount:kn-kinetic-cluster-nodes@my-project.iam.gserviceaccount.com \
+  --role=roles/storage.legacyBucketReader
+```
+
+Replace `kinetic-cluster` and `my-project` with the cluster name and the
+project of your profile. Orbax and TensorStore need the second role to
+read the bucket metadata.
+:::
+
+## Resume a job from a checkpoint
+
+A job can stop before the work is done: Google Cloud preempts a Spot
+node, a node fails, or your code raises an error. Kinetic does not submit
+the job again for you. The checkpoints that the job wrote stay in Cloud
+Storage. To continue the work, submit the function again with the
+**same** output directory. Your code then finds the latest checkpoint
+under that directory and continues from that checkpoint.
+
+The output directory must be the same for each call. With the default
+output directory, each call gets a new job ID and therefore a new, empty
+prefix. The second call then starts from step 0. There are two ways to
+set a fixed directory:
+
+1. Pass `output_dir=` to the decorator:
+
+   ```python
+   @kinetic.run(
+     accelerator="tpu-v5litepod-4",
+     output_dir="gs://my-bucket/runs/exp-01",
+   )
+   def train():
+     ...
+
+
+   train()  # writes checkpoints under gs://my-bucket/runs/exp-01
+   train()  # finds them and resumes
+   ```
+
+2. Export `KINETIC_OUTPUT_DIR` before both submissions:
+
+   ```bash
+   export KINETIC_OUTPUT_DIR=gs://my-bucket/runs/exp-01
+   python train.py   # first run
+   python train.py   # resumes
+   ```
+
+A path in the jobs bucket also works, for example
+`gs://my-project-kn-kinetic-cluster-jobs/outputs/exp-01`, and needs no
+extra access grant. The 30-day rule of that bucket applies (see below).
 
 ## Recommended directory layout
 
-A simple convention that scales from one job to many:
+The layout below works for a single job and for many jobs:
 
 ```text
 $KINETIC_OUTPUT_DIR/
 ├── checkpoints/        # Orbax / model.save_weights — periodic snapshots
-├── logs/               # extra logs your code writes (stdout already streams)
-├── metrics/            # tensorboard / json metric dumps
+├── logs/               # extra logs that your code writes (stdout already streams)
+├── metrics/            # TensorBoard / JSON metric dumps
 └── final/              # post-training artifacts: exported model, eval results
 ```
 
-Use whichever subdirectories make sense for your workflow. The point is
-that the layout is yours to control — Kinetic only cares that you write
-under the prefix it gave you.
+Use the subdirectories that fit your workflow. Kinetic does not read or
+interpret the layout. Kinetic only requires that you write under the
+prefix that it gives you.
 
-## TTL and retention
+## Retention and cleanup
 
-By default the GCS bucket Kinetic creates has a **30-day TTL** on its
-contents. Anything written to `KINETIC_OUTPUT_DIR` is auto-deleted
-after 30 days. That's the right default for ephemeral training, but if
-you want a checkpoint to outlive a month:
+**The 30-day rule.** The jobs bucket has a lifecycle rule that deletes
+every object 30 days after its creation. Cloud Storage therefore deletes
+the files under the default `KINETIC_OUTPUT_DIR` after 30 days. That
+default fits short experiments. If a checkpoint or a model must stay
+longer than 30 days, do one of these two things:
 
-- Copy it to a bucket with no lifecycle policy (`gsutil cp` or the GCS
-  client library).
-- Or set `output_dir=` to a bucket you manage yourself, with whatever
-  lifecycle rules you want.
+- Copy the files to a bucket without a lifecycle rule, with
+  `gcloud storage cp` or the Cloud Storage client library.
+- Set `output_dir=` to a bucket that you manage, with the lifecycle
+  rules that you choose (see the access note above).
 
-:::{note}
-`JobHandle.cleanup(gcs=True)` removes the per-job artifacts under the
-GCS prefix used for code and result payloads — it does **not** touch
-files you wrote under `KINETIC_OUTPUT_DIR`. Outputs survive cleanup.
+**Job cleanup does not delete outputs.** A blocking call, a
+`JobHandle.result()` call, `JobHandle.cleanup(gcs=True)`, and
+`kinetic jobs cleanup JOB_ID` delete the job artifacts under
+`gs://{jobs bucket}/{job_id}/`. Those artifacts include the serialized
+function, the source archive, and the result. These calls never delete
+files under `KINETIC_OUTPUT_DIR`. `result()` deletes the artifacts only
+after it collects a usable result; a failed job keeps its artifacts. Pass
+`cleanup=False` to `result()`, or `--no-cleanup` to
+`kinetic jobs result`, to keep the artifacts of a job that succeeded.
+
+:::{warning}
+`kinetic down` deletes the cluster and the jobs bucket, with every output
+in that bucket. Before you run `kinetic down`, copy the files that you
+want to keep to a bucket that Kinetic does not manage.
 :::
 
-## Copy-paste checklist
+## Checklist for a long job
 
-A short checklist for any long-running job that you don't want to redo
-from scratch:
+Follow these steps for a job that you do not want to run again from the
+start:
 
 :::{container} kinetic-steps
-1. **Read `KINETIC_OUTPUT_DIR`** inside the function and write everything
-   durable under it.
+1. **Read `KINETIC_OUTPUT_DIR`** inside the function, and write every
+   durable file under that path.
 
-2. **Write checkpoints to a stable subdirectory** (e.g.
-   `$KINETIC_OUTPUT_DIR/checkpoints/`) so the resume path is
-   predictable.
+2. **Write checkpoints to a fixed subdirectory**, for example
+   `$KINETIC_OUTPUT_DIR/checkpoints/`, so that you know the resume path.
 
-3. **Choose a checkpoint cadence** that bounds how much work a restart
-   would lose (every N steps, or every M minutes).
+3. **Choose a checkpoint interval** that limits the work that a restart
+   loses: every N steps, or every M minutes.
 
-4. **Verify resume works locally** before the long run — submit the same
-   function twice with the same `output_dir` and confirm the second
-   call picks up where the first left off.
+4. **Set a fixed output directory** with `output_dir=` or with a local
+   `KINETIC_OUTPUT_DIR`. Without a fixed directory, the second submission
+   gets a new, empty prefix and cannot resume.
 
-5. **If the run is critical**, copy the final artifacts to a bucket
-   without the 30-day TTL after success.
+5. **Test the resume before the long run.** Submit the same function two
+   times with the same output directory, and confirm that the second
+   call continues from the last checkpoint.
+
+6. **Copy the final artifacts** to a bucket without the 30-day rule if the
+   run is important.
 :::
 
 ## JAX example
 
+The example below shows the write-and-read pattern with Orbax. The
+function points a `CheckpointManager` at `KINETIC_OUTPUT_DIR`. It
+restores the latest step if one exists, and it saves a checkpoint after
+each step.
+
+The example uses `@kinetic.run(accelerator="cpu")` with no `output_dir=`,
+so each call gets a new default output directory and starts from step 0.
+To see a real resume, add `output_dir="gs://..."` to the decorator, or
+export `KINETIC_OUTPUT_DIR` before you run the script two times.
+
 ```{literalinclude} ../../examples/example_checkpoint.py
 ```
 
-After the snippet:
-
-- The function reads `KINETIC_OUTPUT_DIR` and points Orbax's
-  `CheckpointManager` at it.
-- Calling the function a second time picks up from the latest step
-  rather than restarting from scratch.
-
 ## Keras example
+
+The Keras example uses the same pattern. `model.get_weights()` returns a
+list of NumPy arrays, and Orbax saves that list as a PyTree. After a
+restore, `model.set_weights()` loads the arrays back into the model. As
+with the JAX example, add `output_dir=` or export `KINETIC_OUTPUT_DIR`
+to make two calls share one output directory.
 
 ```{literalinclude} ../../examples/example_keras_checkpoint.py
 ```
-
-After the snippet:
-
-- `model.get_weights()` produces a PyTree of NumPy arrays that Orbax
-  knows how to save.
-- `model.set_weights()` restores them on resume.
 
 ## Related pages
 
 ::::{grid} 1 1 2 2
 :gutter: 3
 
-:::{grid-item-card} {octicon}`database;1em` Data
+:::{grid-item-card} {octicon}`database;1em` Working with Data
 :link: data
 :link-type: doc
 
-Input side of the I/O story.
+The input side: ship local files and read Cloud Storage data from your
+function.
 :::
 
-:::{grid-item-card} {octicon}`clock;1em` Managing Async Jobs
+:::{grid-item-card} {octicon}`clock;1em` Detached Jobs
 :link: async_jobs
 :link-type: doc
 
-Long jobs are also the place where you most want detached submission.
+Submit long jobs with `run_async()`, and collect or clean up their
+results later.
 :::
 
 :::{grid-item-card} {octicon}`graph;1em` Cost Optimization
 :link: cost_optimization
 :link-type: doc
 
-Spot instances make checkpointing essential.
+Spot capacity lowers the cost, and a checkpoint makes a preempted run
+resumable.
 :::
 ::::

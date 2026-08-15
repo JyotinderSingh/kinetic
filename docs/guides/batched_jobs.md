@@ -1,78 +1,88 @@
 # Batched Jobs
 
-`run_async()` is the tool for a single long-running job. When you
-need to run the **same function over many inputs**, such as a hyperparameter
-sweep, one job per dataset shard, an evaluation grid — wiring that up
-by hand means a loop that calls `run_async()`, your own bookkeeping for
-which handles are still live, your own error aggregation, your own
-cleanup. `run_async_map()` is that loop, done for you.
+This page explains `run_async_map()`, the call that runs one decorated
+function over many inputs as independent jobs. Use it for a
+hyperparameter sweep, for one job per dataset shard, or for an
+evaluation grid. The call returns one `BatchHandle` for the whole
+batch. With that handle you watch progress, collect the results in input
+order, handle failures, cancel jobs, and delete the resources.
 
-You call `run_async_map()` on a `@kinetic.run()`-decorated function with a list of
-inputs. It returns a single `BatchHandle` that represents the whole
-collection: one place to observe progress, collect results in input
-order, handle failures, cancel siblings, and tear everything down. The
-underlying jobs are independent Kinetic jobs — each one gets a real
-`JobHandle`, runs on its own pod, and writes its own artifacts to GCS.
+## Before you start
 
-This page builds on the single-job workflow covered in
-[Detached Jobs](async_jobs.md). Familiarity with `JobHandle` and the
-`PENDING`/`RUNNING`/`SUCCEEDED`/`FAILED`/`NOT_FOUND` lifecycle is
-assumed.
+- Read [Detached Jobs](async_jobs.md). Each job in a batch is a normal
+  detached job with its own `JobHandle`, its own pod, and its own
+  artifacts in the jobs bucket.
+- Know the job statuses: `PENDING`, `RUNNING`, `SUCCEEDED`, `FAILED`,
+  and `NOT_FOUND`. A batch reports the same statuses per job.
 
-## A first fan-out
+## A first batch
 
-Pass a `@kinetic.run()`-decorated function and a list of inputs to
-`run_async_map()`. It returns a `BatchHandle` immediately while jobs are
-submitted in the background.
+Call `run_async_map()` on a `@kinetic.run()`-decorated function with a
+list of inputs. Kinetic submits one job per input and returns a
+`BatchHandle`.
 
 ```python
 import kinetic
 
 
-@kinetic.run(accelerator="tpu-v5e-1")
+@kinetic.run(accelerator="tpu-v5litepod-4")
 def train(lr):
   import keras
+  import numpy as np
 
+  x = np.random.rand(1000, 20).astype("float32")
+  y = x.sum(axis=1, keepdims=True)
   model = keras.Sequential(
     [keras.layers.Dense(64, activation="relu"), keras.layers.Dense(1)]
   )
   model.compile(optimizer=keras.optimizers.Adam(learning_rate=lr), loss="mse")
-  history = model.fit(x_train, y_train, epochs=10, verbose=0)
+  history = model.fit(x, y, epochs=10, verbose=0)
   return history.history["loss"][-1]
 
 
 batch = train.run_async_map([0.001, 0.01, 0.1])
 losses = batch.results()
-print(losses)  # [0.32, 0.28, 0.41] — one result per input, in order
+print(losses)  # [0.32, 0.28, 0.41] — one result per input, in input order
 ```
 
 :::{note}
-You must use `run_async_map()` to fan out. Calling the decorated function
-directly will block until the job finishes and return the result directly,
-so it cannot be used for concurrent execution of multiple inputs.
+A blocking call to the decorated function blocks until that one job ends.
+To run many inputs at the same time, use `run_async_map()`.
 :::
+
+`run_async_map()` accepts these keyword arguments:
+
+| Argument | Default | Meaning |
+| -------- | ------- | ------- |
+| `input_mode` | `"auto"` | How Kinetic passes each item to the function. See [Input modes](#input-modes). |
+| `max_concurrent` | `64` | The maximum number of jobs that are active at one time. `None` removes the limit. |
+| `retries` | `0` | The number of additional attempts for an input after a job failure. |
+| `fail_fast` | `False` | Stop the submission of new jobs after the first failure. |
+| `cancel_running_on_fail` | `False` | With `fail_fast=True`, also cancel the running jobs after the first failure. |
+| `name`, `tags` | `None` | A name and key-value metadata that Kinetic stores in the batch manifest. |
+| `project`, `cluster` | `None` | One-off overrides. Leave them unset; the active profile supplies them. |
 
 ## Input modes
 
-The `input_mode` parameter controls how each item in `inputs` is passed
-to the function.
+The `input_mode` argument controls how Kinetic passes each item in
+`inputs` to the function.
 
-| `input_mode`       | Item type                         | How it's called | Example item                  |
+| `input_mode`       | Item type                         | Call            | Example item                  |
 | ------------------ | --------------------------------- | --------------- | ----------------------------- |
 | `"auto"` (default) | `dict` with valid identifier keys | `fn(**item)`    | `{"lr": 0.01, "wd": 1e-4}`    |
 | `"auto"` (default) | `list` or `tuple`                 | `fn(*item)`     | `[0.01, 32]`                  |
-| `"auto"` (default) | anything else                     | `fn(item)`      | `0.01`                        |
-| `"single"`         | any                               | `fn(item)`      | always passed as a single arg |
+| `"auto"` (default) | any other type                    | `fn(item)`      | `0.01`                        |
+| `"single"`         | any                               | `fn(item)`      | Always one positional argument |
 | `"args"`           | `list` or `tuple` (required)      | `fn(*item)`     | `[0.01, 32]`                  |
 | `"kwargs"`         | `dict` (required)                 | `fn(**item)`    | `{"lr": 0.01}`                |
 
-### Dict inputs (kwargs unpacking)
+### Dict inputs
 
-When using `"auto"` mode, dicts with valid Python identifier keys are
-unpacked as keyword arguments:
+In `"auto"` mode, Kinetic unpacks a dict with valid Python identifier
+keys as keyword arguments:
 
 ```python
-@kinetic.run(accelerator="tpu-v5e-1")
+@kinetic.run(accelerator="tpu-v5litepod-4")
 def train(lr, batch_size): ...
 
 
@@ -83,10 +93,10 @@ configs = [
 batch = train.run_async_map(configs)
 ```
 
-### Preventing unpacking
+### Prevent unpacking
 
-If your function takes a list or dict as a single argument, use
-`input_mode="single"` to prevent automatic unpacking:
+If your function takes a list or a dict as one argument, pass
+`input_mode="single"`:
 
 ```python
 @kinetic.run(accelerator="cpu")
@@ -98,16 +108,16 @@ batch = process.run_async_map([[1, 2, 3], [4, 5, 6]], input_mode="single")
 ```
 
 :::{note}
-In `"auto"` mode, dicts with non-identifier keys (like
-`{"not-an-id": 1}`) or Python keywords (like `{"class": 1}`) are passed
-as a single positional argument rather than unpacked. Use
-`input_mode="kwargs"` or `input_mode="single"` if you need explicit
-control.
+In `"auto"` mode, Kinetic does not unpack every dict. A dict with a key
+that is not a valid identifier, for example `{"not-an-id": 1}`, becomes
+one positional argument. The same applies to a dict with a key that is
+a Python keyword, for example `{"class": 1}`. Use `input_mode="kwargs"`
+or `input_mode="single"` if you need explicit control.
 :::
 
-## Monitoring a batch
+## Monitor a batch
 
-You can inspect progress at any time through the `BatchHandle`.
+You can inspect the batch at any time through the `BatchHandle`.
 
 ```python
 # Per-job status
@@ -117,59 +127,69 @@ for idx, status in batch.statuses():
 # Aggregate counts
 print(batch.status_counts())
 # {'RUNNING': 2, 'SUCCEEDED': 1}
+
+# Block until every job is terminal (optional timeout in seconds)
+batch.wait(timeout=1800)
 ```
 
 `statuses()` returns `(index, JobStatus)` pairs for each submitted job.
-Slots that haven't been submitted yet (when using bounded concurrency)
-are skipped. Job statuses follow the same lifecycle as single jobs —
-see [Detached Jobs](async_jobs.md) for details on `PENDING`, `RUNNING`,
-`SUCCEEDED`, `FAILED`, and `NOT_FOUND`.
+Kinetic skips a slot that is not submitted yet, for example under a
+concurrency limit. `wait()` blocks until the submission ends and every
+submitted job is terminal. `wait()` raises `TimeoutError` if the
+timeout expires.
 
-## Collecting results
+## Collect results
 
 ### `results()`
 
-The simplest way to collect all results. By default it blocks until
-every job finishes and returns results in input order.
+`results()` is the simplest way to collect every result. It blocks
+until every job ends and returns the results in input order.
 
 ```python
-# Input order (default)
 losses = batch.results()
-# losses[0] corresponds to inputs[0], losses[1] to inputs[1], etc.
-```
-
-For faster access to early finishers, use `ordered=False` to collect in
-completion order:
-
-```python
-losses = batch.results(ordered=False)
-# Results appear in the order jobs finish, not input order
+# losses[0] belongs to inputs[0], losses[1] to inputs[1], and so on
 ```
 
 **Parameters:**
 
-- **`timeout`** (`float | None`, default `None`): Maximum seconds to
-  wait. Raises `TimeoutError` if exceeded.
-- **`ordered`** (`bool`, default `True`): `True` returns results aligned
-  with `inputs`. `False` returns results in the order jobs complete.
-- **`cleanup`** (`bool`, default `True`): Delete each child's Kubernetes
-  resources and GCS artifacts after downloading its result. The group
-  manifest is preserved so `attach_batch()` still works.
-- **`return_exceptions`** (`bool`, default `False`): When `True`, failed
-  positions contain the exception object instead of raising
-  `BatchError`. When `False`, any failure raises `BatchError`.
+- **`timeout`** (`float | None`, default `None`): The maximum number of
+  seconds to wait. `results()` raises `TimeoutError` when the timeout
+  expires.
+- **`ordered`** (`bool`, default `True`): `True` returns the results
+  aligned with `inputs`. `False` returns the results in the order in
+  which the jobs ended.
+- **`cleanup`** (`bool`, default `True`): Delete the resources of each
+  child after Kinetic downloads its result. See the caution below.
+- **`return_exceptions`** (`bool`, default `False`): When `True`, a
+  failed position holds the exception object and `results()` does not
+  raise. When `False`, any failure raises `BatchError`.
+
+:::{caution}
+With the default `cleanup=True`, `results()` deletes the Kubernetes Job
+of every child, and also the Cloud Storage artifacts of every child
+that succeeded. Those artifacts include the child's `handle.json`, so
+`attach_batch()` cannot load those children later and can block. If you
+want to reattach to the batch later, or to read the logs of a failed
+child, call `results(cleanup=False)`. Call `batch.cleanup()` when you
+no longer need the batch. See [Clean up](#clean-up).
+:::
 
 :::{important}
-A `TimeoutError` does not cancel running jobs. They continue executing
-on the cluster. Call `batch.cancel()` explicitly if you want to stop
-them after a timeout.
+A `TimeoutError` does not cancel the jobs. The jobs continue to run on
+the cluster. Call `batch.cancel()` if you want to stop them after a
+timeout, and read [Manual cancellation](#manual-cancellation) first.
 :::
+
+`ordered=False` does not give you earlier access to a result.
+`results(ordered=False)` also returns only after every job is terminal.
+It changes only the order of the list and the moment at which Kinetic
+cleans up each child. To process results as jobs end, use
+`as_completed()`.
 
 ### `as_completed()`
 
-For processing results incrementally as jobs finish, use the
-`as_completed()` iterator. It yields `JobHandle` objects in completion
-order.
+`as_completed()` yields each `JobHandle` as its job reaches a terminal
+state, in completion order.
 
 ```python
 for job in batch.as_completed():
@@ -177,45 +197,66 @@ for job in batch.as_completed():
   print(f"{job.job_id} finished: {result}")
 ```
 
-`as_completed()` streams results even while submission is still in
-progress. With bounded concurrency, you can start processing the first
-results before the last inputs have been submitted.
+`as_completed()` yields jobs while the submission of other inputs is
+still in progress. Under a concurrency limit, you can process the first
+results before Kinetic submits the last inputs. Each `job.result()` call
+in the loop cleans up that child by default; pass `cleanup=False` to
+keep its resources.
 
 **Parameters:**
 
-- **`poll_interval`** (`float`, default `5.0`): Seconds between status
-  polls.
-- **`timeout`** (`float | None`, default `None`): Maximum seconds to
-  wait. Raises `TimeoutError` if exceeded.
+- **`poll_interval`** (`float`, default `5.0`): The number of seconds
+  between status polls.
+- **`timeout`** (`float | None`, default `None`): The maximum number of
+  seconds to wait. `as_completed()` raises `TimeoutError` when the
+  timeout expires.
 
-## Handling failures
+## Handle failures
 
 When any job fails and `return_exceptions=False` (the default),
 `results()` raises a `BatchError`.
 
 ```python
 try:
-  results = batch.results()
+  results = batch.results(cleanup=False)
 except kinetic.BatchError as e:
-  print(
-    f"Batch {e.group_id}: {len(e.failures)} of {len(e.partial_results)} jobs failed"
-  )
+  print(e)  # "Batch grp-a1b2c3d4: 2 of 10 jobs failed"
   for job in e.failures:
-    print(f"  {job.job_id}: {job.status().value}")
-  # e.partial_results has results at successful positions, None at failed ones
+    if job is None:
+      continue  # This input failed at submission. See batch.submission_failures.
+    print(f"{job.job_id}: {job.status().value}")
+    print(job.tail(n=20))
+  for idx, exc in batch.submission_failures.items():
+    print(f"Input {idx} failed at submission: {exc}")
+  # e.partial_results holds the result at each successful position
+  # and None at each failed position.
 ```
 
-`BatchError` provides three attributes:
+`BatchError` has three attributes:
 
 - **`group_id`**: The batch identifier.
-- **`failures`**: List of `JobHandle` objects for the failed jobs.
-- **`partial_results`**: A list aligned with `inputs` where successful
-  positions contain the result and failed positions contain `None`.
+- **`failures`**: A list with one entry per failed input. The entry is
+  the `JobHandle` of the failed job, or `None` if the input failed at
+  submission time. Test for `None` before you use the entry.
+- **`partial_results`**: With `ordered=True`, a list aligned with
+  `inputs`, where a successful position holds the result and a failed
+  position holds `None`. With `ordered=False`, a shorter list in
+  completion order that holds only the successful results.
 
-### Tolerating failures
+The example passes `cleanup=False`. With the default `cleanup=True`,
+`results()` deletes the Kubernetes Job of every child before it raises
+`BatchError`. After that deletion, `job.status()` returns `NOT_FOUND`
+and `job.tail()` raises `RuntimeError`, because the pod is gone. Even
+with `cleanup=False`, Kubernetes deletes a finished Job about 10 minutes
+after it ends, so read the logs soon after the failure. This retention
+window applies to single-host jobs on the GKE backend. A multi-host
+Pathways job has no retention window; its resources stay until a
+cleanup call deletes them.
 
-Use `return_exceptions=True` to collect results without raising. Failed
-positions contain the exception object.
+### Tolerate failures
+
+Pass `return_exceptions=True` to collect the results without an
+exception. A failed position holds the exception object.
 
 ```python
 results = batch.results(return_exceptions=True)
@@ -226,89 +267,105 @@ for i, r in enumerate(results):
     print(f"Job {i}: {r}")
 ```
 
-### Inspecting failures
+### Inspect failed jobs
 
-`failures()` returns handles for jobs with status `FAILED`. It
-intentionally excludes `NOT_FOUND` because that status is ambiguous —
-a job may be `NOT_FOUND` because its Kubernetes resources were cleaned
-up, not because it failed. Use `statuses()` for finer-grained
-inspection.
+`failures()` returns the handles of the jobs with status `FAILED`. It
+excludes `NOT_FOUND`, because that status is ambiguous. A job can be
+`NOT_FOUND` because Kinetic deleted its Kubernetes resources, not
+because it failed. Use `statuses()` for a finer inspection. After
+`results()` has run, `failures()` returns the list of failed handles
+that `results()` recorded.
 
 ```python
+batch.wait()
 for job in batch.failures():
   print(f"{job.job_id}: {job.tail(n=20)}")
 ```
 
+`job.tail()` reads the pod log, so call it while the pod exists. Call
+it after `wait()` and before `results()`, or after
+`results(cleanup=False)`, within the 10-minute Kubernetes retention
+window.
+
+### Submission failures
+
+The call that submits an input can raise, for example because of a
+packaging or validation error. Kinetic then records the exception and
+leaves `batch.jobs[idx]` as `None`. Kinetic does not retry a submission
+failure. The `batch.submission_failures` property returns a dict that
+maps the input index to the exception. `results()` reports these inputs
+as failures. The entry in `BatchError.failures` is `None`. The position
+in the results holds the exception object only when
+`return_exceptions=True`. `wait()` logs a warning when a batch has
+submission failures.
+
 ## Retries
 
-The `retries` parameter specifies how many additional attempts a job
-gets after failure. The total number of attempts per input is
-`1 + retries`.
+The `retries` argument sets the number of additional attempts that an
+input gets after a job failure. The total number of attempts per input
+is `1 + retries`.
 
 ```python
 batch = train.run_async_map(configs, retries=2)
-# Each job gets up to 3 attempts (1 initial + 2 retries)
+# Each input gets up to 3 attempts (1 initial + 2 retries)
 ```
 
-- Retries are triggered when a job reaches `FAILED` or `NOT_FOUND`
-  status.
-- Before each retry, Kinetic cleans up the previous attempt's
-  Kubernetes resources (GCS artifacts are preserved for debugging).
-- The group manifest tracks the attempt count per job, so
-  `attach_batch()` can distinguish retries from initial submissions.
-- Submission errors (when the call to the function itself raises) are
-  not retried. These are typically packaging or configuration errors
-  that would fail again.
+- Kinetic starts a retry when a job reaches `FAILED` or `NOT_FOUND`.
+- Before each retry, Kinetic deletes the Kubernetes resources of the
+  previous attempt and keeps its Cloud Storage artifacts.
+- Each attempt is a new job with a new job ID. The batch manifest keeps
+  only the latest job ID for the input.
+- Kinetic does not retry a submission failure.
 
 :::{note}
-When `retries > 0`, job submission runs in a background thread so
-Kinetic can poll for failures and resubmit.
+When `retries > 0`, Kinetic runs the submission loop in a background
+thread, so that it can poll for failures and resubmit.
 :::
 
 ## Concurrency control
 
-By default, `run_async_map()` limits the number of concurrently active
-jobs to 64. Use `max_concurrent` to tune this.
+By default, `run_async_map()` limits the number of active jobs to 64.
+Use `max_concurrent` to change the limit.
 
 ```python
-# At most 8 jobs running at once
+# At most 8 jobs run at one time
 batch = train.run_async_map(configs, max_concurrent=8)
 ```
 
 ```python
-# Submit all jobs immediately (no concurrency limit)
+# Submit every job at once (no limit)
 batch = train.run_async_map(configs, max_concurrent=None)
 ```
 
-- **Default:** `64`. New jobs are launched as running ones finish.
-- **`None`:** All inputs are submitted immediately with no concurrency
-  limit. When combined with `retries=0` (the default), submission
-  happens synchronously in the calling thread before `map()` returns.
-- Must be a positive integer when set. Passing `0` or a negative value
-  raises `ValueError`.
+- **Default `64`:** Kinetic starts a new job each time an active job
+  ends.
+- **`None`:** Kinetic submits every input at once. With `retries=0`
+  (the default), the submission runs in the calling thread before
+  `run_async_map()` returns.
+- The value must be a positive integer when set. `0` or a negative
+  value raises `ValueError`.
 
 :::{note}
-Kinetic logs a warning when submitting more than 100 jobs with
-`max_concurrent=None`, suggesting you set a limit to control resource
-usage.
+Kinetic logs a warning when you submit more than 100 inputs with
+`max_concurrent=None`. Set a limit to control the resource usage.
 :::
 
 ## Cancellation and fail-fast
 
 ### Fail-fast behavior
 
-The `fail_fast` and `cancel_running_on_fail` parameters control what
+The `fail_fast` and `cancel_running_on_fail` arguments control what
 happens when a job fails.
 
-| `fail_fast`       | `cancel_running_on_fail` | On first failure...                                                              |
-| ----------------- | ------------------------ | -------------------------------------------------------------------------------- |
-| `False` (default) | `False` (default)        | All remaining jobs continue. Failures are collected at the end.                  |
-| `True`            | `False`                  | No new jobs are launched. Already-running jobs continue to completion.           |
-| `True`            | `True`                   | No new jobs are launched. All running siblings are cancelled immediately.        |
-| `False`           | `True`                   | **No effect.** `cancel_running_on_fail` only takes effect when `fail_fast=True`. |
+| `fail_fast`       | `cancel_running_on_fail` | On the first failure                                                              |
+| ----------------- | ------------------------ | --------------------------------------------------------------------------------- |
+| `False` (default) | `False` (default)        | All remaining jobs continue. Kinetic reports the failures at the end.             |
+| `True`            | `False`                  | Kinetic starts no new jobs. Jobs that already run continue to the end.            |
+| `True`            | `True`                   | Kinetic starts no new jobs and cancels all running jobs at once.                  |
+| `False`           | `True`                   | **No effect.** `cancel_running_on_fail` applies only when `fail_fast=True`.       |
 
 ```python
-# Stop the batch as soon as any job fails, cancel all running siblings
+# Stop the batch as soon as any job fails, and cancel all running jobs
 batch = train.run_async_map(
   configs,
   fail_fast=True,
@@ -316,75 +373,124 @@ batch = train.run_async_map(
 )
 ```
 
-A "failure" here means either a submission error (
-the call raised) or a runtime failure (the remote job reached
-`FAILED` or `NOT_FOUND` status after exhausting retries).
+A "failure" here is either a submission failure or a runtime failure: a
+job that reaches `FAILED` or `NOT_FOUND` after all its attempts.
+
+:::{note}
+`run_async_map(max_concurrent=None, retries=0, fail_fast=True)` does not
+return at once. In that configuration the submission loop runs in the
+calling thread, and `fail_fast` makes the loop poll until every job is
+terminal. If you want the call to return at once, set a concurrency
+limit or leave `fail_fast=False`.
+:::
 
 ### Manual cancellation
 
-You can cancel all non-terminal jobs at any time, independent of the
-`fail_fast` setting:
+`batch.cancel()` cancels every submitted job that is not terminal:
 
 ```python
 batch.cancel()
 ```
 
-Cancellation deletes each job's Kubernetes resource but preserves GCS
-artifacts for debugging.
+Cancellation deletes the Kubernetes resource of each job and keeps the
+Cloud Storage artifacts. Cancellation does not stop the background
+submission loop. Two consequences follow:
 
-## Reattaching to a batch
+- Under a concurrency limit, the loop sees the cancelled jobs as
+  terminal, frees their slots, and submits the remaining inputs.
+- With `retries > 0`, the loop treats each cancelled job as a failed
+  attempt and resubmits the input until no attempts remain.
 
-If your local process exits or you want to check on a batch from a
+To make `batch.cancel()` stop the whole batch, use one of these
+configurations:
+
+- `max_concurrent=None` with the defaults `retries=0` and
+  `fail_fast=False`. Kinetic submits every input before
+  `run_async_map()` returns, so no input remains for the loop to
+  submit.
+- `fail_fast=True` with `retries=0`. The loop treats the first cancelled
+  job as a failure and stops the submission of new inputs.
+
+## Reattach to a batch
+
+If your local process exits, or if you want to check a batch from a
 different machine, save the `group_id` and reattach later.
 
 ```python
 # Original session
 batch = train.run_async_map(configs)
 print(f"Batch ID: {batch.group_id}")  # e.g., "grp-a1b2c3d4"
+results = batch.results(cleanup=False)  # keep the child handles
 
-# Later, from any machine with access to the same GCP project
-batch = kinetic.attach_batch("grp-a1b2c3d4")
-results = batch.results()
+# Later, from any machine with the same active profile
+batch = kinetic.attach_batch("grp-a1b2c3d4", poll_timeout=60)
+results = batch.results(cleanup=False)
+batch.cleanup()  # when you are done
 ```
 
-`attach_batch()` downloads the group manifest from GCS and reconstructs
-a `JobHandle` for each child. Index alignment is preserved: if the
-original batch had 10 inputs and only 7 were submitted before a crash,
-the returned `batch.jobs` list has 10 entries with `None` in the 3
-unsubmitted slots.
+`attach_batch()` downloads the batch manifest from Cloud Storage and
+rebuilds a `JobHandle` for each child. Kinetic keeps the index
+alignment. If the original batch had 10 inputs and the process crashed
+after 7 submissions, `batch.jobs` has 10 entries. The 3 slots without a
+submission hold `None`.
 
-:::{note}
-Kinetic logs a warning when a reattached batch has fewer children than
-expected, indicating partial submission.
+When the manifest has fewer children than expected, `attach_batch()`
+logs a warning and starts a background thread. That thread polls the
+manifest until all children appear or until `poll_timeout` expires.
+`wait()`, `results()`, and `as_completed()` block until that thread
+ends. The default `poll_timeout=None` polls without a limit.
+
+:::{caution}
+In two situations, `attach_batch()` loads fewer children than expected,
+and the missing children never appear. First, the original process
+crashed during the submission. Second, `results()` with the default
+`cleanup=True` deleted the `handle.json` of the successful children. In
+both situations, `attach_batch()` with the default `poll_timeout=None`
+makes a later `wait()`, `results()`, or `as_completed()` block and never
+return. Pass `poll_timeout` when you reattach. Use
+`results(cleanup=False)` in the original session if you plan to
+reattach.
 :::
 
 **Parameters:**
 
-- **`group_id`** (`str`): The batch identifier (e.g., `"grp-a1b2c3d4"`).
-- **`project`** (`str | None`, default `None`): GCP project. Uses the
-  default when `None`.
-- **`cluster`** (`str | None`, default `None`): GKE cluster name. Uses
-  the default when `None`.
+- **`group_id`** (`str`): The batch identifier (for example
+  `"grp-a1b2c3d4"`).
+- **`project`** (`str | None`, default `None`): A one-off override. The
+  active profile supplies the project when `None`.
+- **`cluster`** (`str | None`, default `None`): A one-off override. The
+  active profile supplies the cluster when `None`.
+- **`poll_interval`** (`float`, default `10.0`): The number of seconds
+  between manifest polls when children are missing.
+- **`poll_timeout`** (`float | None`, default `None`): The maximum
+  number of seconds to poll for missing children. `None` polls without
+  a limit.
 
-## Cleanup
+## Clean up
 
-There are two ways to clean up resources after a batch completes.
+There are two ways to delete the resources of a batch.
 
-### Automatic cleanup via `results()`
+### Automatic cleanup through `results()`
 
-By default, `results(cleanup=True)` deletes each child's Kubernetes
-resources and GCS artifacts after downloading its result. The group
-manifest is preserved, so `attach_batch()` still works.
+By default, `results()` cleans up each child after it downloads the
+result of that child. For every child, Kinetic deletes the Kubernetes
+Job. For a child that succeeded, Kinetic also deletes the Cloud Storage
+artifacts, including `handle.json`. A child that failed keeps its
+artifacts. Kinetic keeps the batch manifest.
 
 ```python
-# Each child is cleaned up as its result is downloaded
 results = batch.results()  # cleanup=True is the default
 ```
 
-### Full teardown
+Because the successful children lose their `handle.json`, a later
+`attach_batch()` finds the manifest but cannot load those children. Use
+`results(cleanup=False)` if you plan to reattach, then call
+`batch.cleanup()` at the end.
 
-To delete everything — all children's resources and the group manifest
-itself — call `cleanup()` on the handle:
+### Full cleanup
+
+To delete everything, including the batch manifest, call `cleanup()` on
+the handle:
 
 ```python
 batch.cleanup(k8s=True, gcs=True)
@@ -392,14 +498,14 @@ batch.cleanup(k8s=True, gcs=True)
 
 **Parameters:**
 
-- **`k8s`** (`bool`, default `True`): Delete Kubernetes resources
-  (Jobs/pods) for each child.
-- **`gcs`** (`bool`, default `True`): Delete GCS artifacts for each
-  child **and** the group manifest.
+- **`k8s`** (`bool`, default `True`): Delete the Kubernetes resources
+  (Jobs and pods) of each child.
+- **`gcs`** (`bool`, default `True`): Delete the Cloud Storage
+  artifacts of each child **and** the batch manifest.
 
 :::{important}
-After calling `cleanup(gcs=True)`, the batch can no longer be reattached
-via `attach_batch()` because the manifest has been deleted.
+After `cleanup(gcs=True)`, `attach_batch()` cannot find the batch,
+because the manifest no longer exists.
 :::
 
 ## How it works
@@ -407,37 +513,33 @@ via `attach_batch()` because the manifest has been deleted.
 ### Threading model
 
 When `max_concurrent` is set (the default is 64) or `retries > 0`,
-`run_async_map()` launches a non-daemon background thread to manage
-submissions. The thread polls active jobs for terminal states and
-launches new ones as concurrency slots free up. The `BatchHandle` is
-returned immediately.
+`run_async_map()` starts a background thread that manages the
+submission. The thread polls the active jobs for terminal states and
+starts new jobs when slots become free. `run_async_map()` returns the
+`BatchHandle` at once. The thread is not a daemon thread, so the Python
+process stays alive until the submission ends.
 
-When `max_concurrent=None` and `retries=0`, all jobs are submitted
-synchronously in the calling thread before `map()` returns. No
-background thread is created.
+When `max_concurrent=None` and `retries=0`, Kinetic submits every input
+in the calling thread and starts no background thread. With
+`fail_fast=False`, `run_async_map()` returns as soon as the submission
+ends. With `fail_fast=True`, the calling thread also polls until every
+job is terminal, so `run_async_map()` returns only when the batch ends.
 
 ### Manifest
 
-A JSON manifest is written to GCS before the first job is submitted. It
-records the batch metadata (group ID, expected total, function name,
-tags) and is updated after each successful submission with the child's
-job ID and attempt count. This enables crash recovery: `attach_batch()`
-reads the manifest to determine which jobs were submitted and
-reconstructs the handle.
+Kinetic writes a JSON manifest to `gs://{jobs bucket}/_groups/{group_id}/manifest.json`
+before it submits the first job. The manifest records the batch metadata
+(group ID, expected total, function name, name, and tags). Kinetic
+updates the manifest after each successful submission with the child's
+index and job ID. `attach_batch()` reads the manifest to find the
+submitted jobs and rebuilds the handle from each child's `handle.json`.
 
 ### Group ID
 
-Each batch gets a unique identifier in the format `grp-{8-hex-chars}`
-(e.g., `grp-a1b2c3d4`). This ID is set on each child `JobHandle` as
-`group_id`, along with `group_kind="map"` and the child's `group_index`.
-
-### Submission errors
-
-If a call to the function itself raises (e.g., a packaging or validation
-error), the exception is captured internally and the corresponding slot
-in `batch.jobs` remains `None`. These errors are surfaced when you call
-`results()` — either as entries in the `BatchError.partial_results`
-list or as exception objects when `return_exceptions=True`.
+Each batch gets a unique identifier in the format `grp-{8 hex chars}`
+(for example `grp-a1b2c3d4`). Kinetic sets this ID on each child
+`JobHandle` as `group_id`, together with `group_kind="map"` and the
+child's `group_index`.
 
 ## Related pages
 
@@ -448,29 +550,27 @@ list or as exception objects when `return_exceptions=True`.
 :link: async_jobs
 :link-type: doc
 
-The single-job `run_async()` workflow each child of a batch is built on.
+The `run_async()` workflow and the `JobHandle` that each child of a batch uses.
 :::
 
 :::{grid-item-card} {octicon}`zap;1em` Cost Optimization
 :link: cost_optimization
 :link-type: doc
 
-Fan-out amplifies both throughput and spend; concurrency limits and spot
-instances matter here.
+A batch multiplies the cost as well as the throughput; concurrency limits and Spot capacity help.
 :::
 
-:::{grid-item-card} {octicon}`history;1em` Checkpointing
+:::{grid-item-card} {octicon}`history;1em` Outputs and Checkpoints
 :link: checkpointing
 :link-type: doc
 
-Each child writes to its own `KINETIC_OUTPUT_DIR`; useful for long
-per-job work inside a batch.
+Each child writes to its own `KINETIC_OUTPUT_DIR`; useful for long work inside a batch.
 :::
 
 :::{grid-item-card} {octicon}`bug;1em` Troubleshooting
 :link: ../troubleshooting
 :link-type: doc
 
-What to do when children stick in `PENDING` or repeatedly fail.
+What to do when children stay in `PENDING` or fail repeatedly.
 :::
 ::::

@@ -1,94 +1,93 @@
 # Forward Environment Variables
 
-Kinetic allows you to propagate local environment variables to the remote worker environment. This is useful for passing API keys, configuration, or credentials without hardcoding them in your script.
+The pod does not see the environment variables of your shell. When your
+function needs a value from your local environment — an API key, a
+Kaggle credential, a configuration flag — list the variable name in
+`capture_env_vars`. Kinetic copies the value into the pod at submit
+time. This page covers that parameter, its wildcard rules, and how to
+handle secrets.
 
-## Forwarding Variables
+This page is not about the `KINETIC_*` variables that select the
+project, the zone, the cluster, or the namespace. See
+[Configuration](../configuration.md) for those.
 
-Use the `capture_env_vars` parameter in the `@kinetic.run()` decorator. It accepts a list of environment variable names or wildcard patterns.
+## Forward a variable
+
+Pass a list of names or patterns to `capture_env_vars`:
 
 ```python
 import kinetic
 
 
 @kinetic.run(
-  accelerator="tpu-v5litepod-1",
+  accelerator="tpu-v5litepod-4",
   capture_env_vars=["KAGGLE_USERNAME", "KAGGLE_KEY", "WANDB_*"],
 )
 def train_model():
   import os
 
-  # These are available in the remote process
-  user = os.environ.get("KAGGLE_USERNAME")
-  # ...
+  user = os.environ.get("KAGGLE_USERNAME")  # the value from your shell
+  ...
 ```
 
-## Wildcard Support
+Kinetic reads the values when you call the function, stores them in the
+job payload, and sets them in the pod before your function runs. A
+captured value replaces a variable with the same name in the image.
 
-You can use the `*` suffix to capture all environment variables that start with a specific prefix.
+## Wildcards
 
-- `capture_env_vars=["GOOGLE_CLOUD_*"]`: Captures `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_REGION`, etc.
-- `capture_env_vars=["*"]`: (Not recommended) Captures your full local environment, but not the names in the blocklist below.
+A name that ends with `*` is a prefix pattern:
 
-### Blocklist for wildcard matches
+- `capture_env_vars=["GOOGLE_CLOUD_*"]` captures `GOOGLE_CLOUD_PROJECT`,
+  `GOOGLE_CLOUD_REGION`, and every other name with that prefix.
+- `capture_env_vars=["*"]` captures your full local environment, except
+  the blocklist below. We do not recommend this pattern, because it also
+  captures every secret in your shell.
 
-Some variables describe your local machine, not your job. The pod applies
-the captured values over its own environment. A local `PATH` or
-`LD_LIBRARY_PATH` on the pod points to directories that do not exist
-there, and the job then fails before your code starts. A wildcard pattern
-thus never matches these names:
+A `*` in any other position is not a wildcard.
+
+### Names that a wildcard never matches
+
+Some variables describe your machine, not your job. A local `PATH` or
+`LD_LIBRARY_PATH` points to directories that do not exist in the pod,
+and the job fails before your code starts. A wildcard pattern therefore
+never matches these names:
 
 `PATH`, `HOME`, `PYTHONPATH`, `LD_LIBRARY_PATH`, `LD_PRELOAD`,
 `VIRTUAL_ENV`, `CONDA_PREFIX`, `CONDA_DEFAULT_ENV`, `SHELL`, `TMPDIR`,
 `TEMP`, `TMP`, `HOSTNAME`, `USER`, `LOGNAME`, `SSH_AUTH_SOCK`,
 `KUBERNETES_SERVICE_HOST`, `KERAS_BACKEND`
 
-Kinetic filters only the wildcard expansion. To forward one of these
-names, list the name exactly in `capture_env_vars`. For example,
-`capture_env_vars=["KERAS_BACKEND"]` replaces the default backend of the
-image. Kinetic writes the names that a wildcard did not capture into the
-log.
+The filter applies to wildcard matches only. To forward one of these
+names, list the name exactly. For example,
+`capture_env_vars=["KERAS_BACKEND"]` replaces the default Keras backend
+of the image. Kinetic logs the names that a wildcard skipped.
 
-## Secure Handling
+## Secrets
 
-Kinetic serializes the values of the requested environment variables and sends them to the remote worker as part of the job payload. Make sure that you forward only the variables that the job needs.
+Kinetic stores the captured values in `payload.pkl` in the jobs bucket.
+Every job pod in the cluster can read that bucket. Kinetic deletes the
+payload when it collects a usable result with the default cleanup. In
+three cases the payload stays until you call `cleanup()` or until the
+30-day lifecycle rule of the bucket deletes it: Kinetic collects no
+result, you pass `cleanup=False`, or you use `debug=True`. Because of this:
 
-Kinetic writes the **names** that it captured into the log on each
-submit. Kinetic never writes the values.
+- Forward only the variables that the job needs.
+- Use short-lived tokens where you can.
 
-Kinetic also logs a warning when a captured name contains `TOKEN`,
-`SECRET`, `KEY`, `PASSWORD`, or `CREDENTIAL`. The comparison ignores the
-letter case. This warning is informational, and Kinetic shows it also for
-a name that you listed exactly. If you intend to forward the credential,
-you need no action.
+Kinetic logs the **names** that it captured on each submit. Kinetic never
+logs the values. Kinetic also logs a warning when a captured name contains
+`TOKEN`, `SECRET`, `KEY`, `PASSWORD`, or `CREDENTIAL`, in any letter case.
+The warning is informational and appears also for a name that you listed
+exactly. If you intend to forward the credential, no action is needed.
+See [Security](../security.md).
 
-The warning tells you where the value goes. Kinetic writes the value into
-`payload.pkl` in the job bucket, which each job pod in the cluster can
-read. Kinetic deletes the artifacts of a job when it collects a usable
-result from that job. If Kinetic does not collect a result, the artifacts
-stay until the lifecycle rule of the bucket deletes them. That rule
-deletes objects after 30 days on a bucket that `kinetic up` created.
+## Variables that Kinetic sets in the pod
 
-Use short-lived tokens for the values that you forward. For more
-information, see [Security](../security.md).
-
-## Precedence
-
-Environment variables set via `capture_env_vars` will override any existing variables with the same name in the remote container's base environment.
-
-## Canonical Environment Variables
-
-Kinetic automatically sets some environment variables in the remote worker environment:
-
-- `KINETIC_OUTPUT_DIR`: The path to the directory where outputs should be saved. By default, this is a GCS path pointing to `gs://{bucket_name}/outputs/{job_id}`. This is useful for passing to checkpointing libraries like Orbax.
-
-:::{important}
-By default, Kinetic imposes a 30-day TTL (Time to Live) on the
-GCS buckets it creates. This means anything written to the default
-`KINETIC_OUTPUT_DIR` will be automatically deleted after 30 days. If you need
-to preserve outputs longer, you should copy them to a bucket without a
-lifecycle rule or specify a custom `output_dir` pointing to a different
-location.
-:::
+Kinetic sets `KINETIC_OUTPUT_DIR` in every pod. The value is a Cloud
+Storage location, by default `gs://{jobs bucket}/outputs/{job_id}`. Write
+every file that you want to keep under that location. See
+[Outputs and Checkpoints](checkpointing.md).
 
 ## Related pages
 
@@ -99,22 +98,20 @@ location.
 :link: ../configuration
 :link-type: doc
 
-Full list of `KINETIC_*` variables and precedence rules.
+The `KINETIC_*` variables that configure Kinetic itself.
 :::
 
-:::{grid-item-card} {octicon}`history;1em` Checkpointing
-:link: checkpointing
+:::{grid-item-card} {octicon}`shield;1em` Security
+:link: ../security
 :link-type: doc
 
-How `KINETIC_OUTPUT_DIR` fits into the durable-output story.
+The trust model, and where the payload lives.
 :::
 
 :::{grid-item-card} {octicon}`key;1em` LLM Fine-tuning
 :link: ../examples/llm_finetuning
 :link-type: doc
 
-`capture_env_vars` is the canonical way to forward Kaggle and other
-model-hub credentials.
+`capture_env_vars` for Kaggle and other model-hub credentials.
 :::
 ::::
-
