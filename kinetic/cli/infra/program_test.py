@@ -5,6 +5,7 @@ from unittest import mock
 from absl.testing import absltest, parameterized
 
 from kinetic.cli.config import NodePoolConfig
+from kinetic.cli.infra import stack_manager
 from kinetic.core.accelerators import GpuConfig, TpuConfig
 
 # Patch pulumi provider modules before importing program, so the module-level
@@ -180,6 +181,150 @@ class TestForceDestroy(parameterized.TestCase):
     }
     self.assertIn("force_destroy", exported)
     self.assertFalse(exported["force_destroy"])
+
+
+_SPOT_GPU = GpuConfig(
+  "a100", 1, "nvidia-tesla-a100", "a2-highgpu-1g", spot=True
+)
+_SPOT_TPU = TpuConfig(
+  "v6e", 8, "2x4", "tpu-v6e-slice", "ct6e-standard-4t", 2, spot=True
+)
+_ON_DEMAND_GPU = GpuConfig("l4", 1, "nvidia-l4", "g2-standard-4")
+_ON_DEMAND_TPU = TpuConfig(
+  "v5p", 8, "2x2x2", "tpu-v5p-slice", "ct5p-hightpu-4t", 2
+)
+
+
+class _ResolvedOutputs(list):
+  """Stands in for ``pulumi.Output.all`` — the resolved values, as a list.
+
+  ``apply`` stays lazy (it returns a mock without running the callback),
+  matching how the fully mocked ``pulumi`` behaves elsewhere in this
+  file. ``_build_kubeconfig`` calls it with mock cluster attributes that
+  its ``json.dumps`` cannot serialize.
+  """
+
+  def apply(self, fn):
+    del fn
+    return mock.MagicMock()
+
+
+def _run_program_capturing_exports(config):
+  """Run the Pulumi program, returning (stack exports, gcp mock).
+
+  ``NodePool.name.apply`` is stubbed to evaluate eagerly, and
+  ``Output.all`` to return the resolved list, so the exported
+  accelerator entries are plain dicts rather than Pulumi Outputs.
+  """
+  exports = {}
+
+  with (
+    mock.patch.object(program, "pulumi") as pulumi_mock,
+    mock.patch.object(program, "command"),
+    mock.patch.object(program, "gcp") as gcp_mock,
+    mock.patch.object(program, "k8s"),
+  ):
+    pulumi_mock.export.side_effect = exports.__setitem__
+    pulumi_mock.Output.all.side_effect = lambda *entries: _ResolvedOutputs(
+      entries
+    )
+
+    def make_node_pool(_resource_name, **kwargs):
+      pool = mock.MagicMock()
+      pool.name.apply.side_effect = lambda fn: fn(kwargs["name"])
+      return pool
+
+    gcp_mock.container.NodePool.side_effect = make_node_pool
+    program.create_program(config)()
+
+  return exports, gcp_mock
+
+
+class TestAcceleratorExportRoundTrip(parameterized.TestCase):
+  """Pool settings must survive export → load_state → re-apply.
+
+  ``pool add``/``pool remove`` rebuild the whole pool list from the
+  ``accelerators`` stack export and re-declare every existing pool. A
+  setting the export omits comes back as its default, and because GKE
+  node_config changes force replacement, the pool is silently rebuilt
+  without it.
+  """
+
+  @parameterized.named_parameters(
+    dict(testcase_name="gpu_spot", accel=_SPOT_GPU, min_nodes=1),
+    dict(testcase_name="tpu_spot", accel=_SPOT_TPU, min_nodes=2),
+    dict(testcase_name="gpu_on_demand", accel=_ON_DEMAND_GPU, min_nodes=0),
+    dict(testcase_name="tpu_on_demand", accel=_ON_DEMAND_TPU, min_nodes=0),
+  )
+  def test_spot_survives_round_trip(self, accel, min_nodes):
+    pool = NodePoolConfig("pool-abcd", accel, min_nodes=min_nodes)
+    exports, _ = _run_program_capturing_exports(_make_config([pool]))
+
+    (entry,) = exports["accelerators"]
+    self.assertEqual(entry["spot"], accel.spot)
+    self.assertEqual(stack_manager._export_to_node_pool(entry), pool)
+
+  @parameterized.named_parameters(
+    dict(testcase_name="gpu", accel=_ON_DEMAND_GPU),
+    dict(testcase_name="tpu", accel=_ON_DEMAND_TPU),
+  )
+  def test_reservation_survives_round_trip(self, accel):
+    pool = NodePoolConfig("pool-abcd", accel, reservation="my-reservation")
+    exports, _ = _run_program_capturing_exports(_make_config([pool]))
+
+    (entry,) = exports["accelerators"]
+    self.assertEqual(entry["reservation"], "my-reservation")
+    self.assertEqual(stack_manager._export_to_node_pool(entry), pool)
+
+  def test_multiple_pools_keep_their_own_settings(self):
+    pools = [
+      NodePoolConfig("gpu-a100-abcd", _SPOT_GPU),
+      NodePoolConfig("gpu-l4-ef01", _ON_DEMAND_GPU, reservation="l4-res"),
+    ]
+    exports, _ = _run_program_capturing_exports(_make_config(pools))
+
+    restored = [
+      stack_manager._export_to_node_pool(e) for e in exports["accelerators"]
+    ]
+    self.assertEqual(restored, pools)
+
+  @parameterized.named_parameters(
+    dict(testcase_name="spot", accel=_SPOT_GPU, reservation=None),
+    dict(
+      testcase_name="reservation", accel=_ON_DEMAND_GPU, reservation="my-res"
+    ),
+  )
+  def test_reapplying_exported_state_keeps_node_config(
+    self, accel, reservation
+  ):
+    """The regression: a second `pool add` must not reset the first pool.
+
+    Simulates `pool add --spot` followed by another pool command —
+    export, read back via load_state, re-declare — and checks the node
+    config Pulumi would apply the second time still carries the
+    setting.
+    """
+    original = NodePoolConfig("pool-abcd", accel, reservation=reservation)
+    exports, _ = _run_program_capturing_exports(_make_config([original]))
+
+    restored = [
+      stack_manager._export_to_node_pool(e) for e in exports["accelerators"]
+    ]
+    new_pool = NodePoolConfig("gpu-l4-new1", _ON_DEMAND_GPU)
+    _, gcp_mock = _run_program_capturing_exports(
+      _make_config(restored + [new_pool])
+    )
+
+    node_config = gcp_mock.container.NodePoolNodeConfigArgs.call_args_list[0]
+    self.assertEqual(node_config.kwargs["spot"], accel.spot)
+    if reservation is None:
+      self.assertIsNone(node_config.kwargs["reservation_affinity"])
+    else:
+      gcp_mock.container.NodePoolNodeConfigReservationAffinityArgs.assert_called_once_with(
+        consume_reservation_type="SPECIFIC_RESERVATION",
+        key="compute.googleapis.com/reservation-name",
+        values=[reservation],
+      )
 
 
 class TestClusterResourceLabels(absltest.TestCase):

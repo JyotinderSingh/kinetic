@@ -123,17 +123,32 @@ def get_current_node_pools(stack) -> list[NodePoolConfig]:
 
 
 def _export_to_node_pool(entry: dict) -> NodePoolConfig:
-  """Convert a stack export dict back to a NodePoolConfig."""
+  """Convert a stack export dict back to a NodePoolConfig.
+
+  Every field must survive this round trip: the result is fed straight
+  back into the Pulumi program, which re-declares the pool. A dropped
+  field is applied as its default, and because GKE node_config changes
+  force replacement, that silently rebuilds the pool without it.
+
+  ``spot`` and ``reservation`` are absent from stacks last updated
+  before they were exported, and default to False / None there.
+  """
   pool_name = entry["node_pool"]
+  spot = bool(entry.get("spot", False))
   accelerator: accelerators.GpuConfig | accelerators.TpuConfig
   if entry["type"] == "GPU":
-    accelerator = accelerators.make_gpu(entry["name"], entry["count"])
+    accelerator = accelerators.make_gpu(
+      entry["name"], entry["count"], spot=spot
+    )
   elif entry["type"] == "TPU":
-    accelerator = accelerators.make_tpu(entry["name"], entry["chips"])
+    accelerator = accelerators.make_tpu(
+      entry["name"], entry["chips"], spot=spot
+    )
   else:
     raise ValueError(f"Unknown accelerator type in node pool export: {entry}")
   return NodePoolConfig(
     name=pool_name,
     accelerator=accelerator,
     min_nodes=entry.get("min_nodes", 0),
+    reservation=entry.get("reservation") or None,
   )

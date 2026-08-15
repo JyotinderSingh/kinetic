@@ -216,6 +216,8 @@ _GPU_LABELS = {
   "machine_type": "Machine Type",
   "node_pool": "Node Pool",
   "node_count": "Node Count",
+  "spot": "Provisioning",
+  "reservation": "Reservation",
 }
 
 _TPU_LABELS = {
@@ -225,7 +227,38 @@ _TPU_LABELS = {
   "machine_type": "Machine Type",
   "node_pool": "Node Pool",
   "node_count": "Node Count",
+  "spot": "Provisioning",
+  "reservation": "Reservation",
 }
+
+
+def _accel_rows(accel, skip=()):
+  """Yield ``(label, value)`` display rows for one accelerator export.
+
+  Keys absent from the export are omitted rather than shown as a
+  default — stacks last updated before ``spot`` and ``reservation``
+  were exported do not record them, and guessing would be wrong.
+  """
+  labels = _GPU_LABELS if accel.get("type") == "GPU" else _TPU_LABELS
+  for key, label in labels.items():
+    if key not in accel or key in skip:
+      continue
+    value = _format_accel_value(key, accel[key])
+    if value is not None:
+      yield label, value
+
+
+def _format_accel_value(key, value):
+  """Format one accelerator field, or return None to omit the row.
+
+  ``spot`` reads better as a provisioning model than as a bool, and a
+  pool with no reservation should not show an empty row.
+  """
+  if key == "spot":
+    return "Spot" if value else "On-demand"
+  if key == "reservation":
+    return value or None
+  return str(value)
 
 
 def infrastructure_state(outputs):
@@ -259,13 +292,10 @@ def infrastructure_state(outputs):
       table.add_row("Accelerator", "CPU only")
     else:
       accel = outputs["accelerator"].value
-      accel_type = accel.get("type", "Unknown")
       table.add_row("", "")
-      table.add_row("Accelerator", accel_type)
-      labels = _GPU_LABELS if accel_type == "GPU" else _TPU_LABELS
-      for key, label in labels.items():
-        if key in accel:
-          table.add_row(f"  {label}", str(accel[key]))
+      table.add_row("Accelerator", accel.get("type", "Unknown"))
+      for label, value in _accel_rows(accel):
+        table.add_row(f"  {label}", value)
 
   else:
     table.add_row(
@@ -284,10 +314,8 @@ def _render_accelerator(table, accel, index=None):
   pool_name = accel.get("node_pool", "")
   prefix = f"  Pool {index}" if index else "  Pool"
   table.add_row(f"{prefix}: {accel_type}", pool_name)
-  labels = _GPU_LABELS if accel_type == "GPU" else _TPU_LABELS
-  for key, label in labels.items():
-    if key in accel and key != "node_pool":
-      table.add_row(f"    {label}", str(accel[key]))
+  for label, value in _accel_rows(accel, skip=("node_pool",)):
+    table.add_row(f"    {label}", value)
 
 
 def config_summary(config):
