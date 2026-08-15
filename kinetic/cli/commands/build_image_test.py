@@ -168,13 +168,18 @@ class TestDockerfileHelp(absltest.TestCase):
     Missing any of these fails the pod at startup, before the payload
     is even unpickled, so the help text has to name all of them.
     """
+    # Assert on the authored string, not `--help` output: Click wraps at
+    # hyphens, so a rendered "google-cloud-storage" can arrive split
+    # across two lines.
+    param = next(p for p in build_image.params if p.name == "dockerfile")
+    for package in ("uv", "cloudpickle", "google-cloud-storage", "absl-py"):
+      self.assertIn(package, param.help)
+    self.assertIn("remote_runner.py", param.help)
+
+  def test_dockerfile_flag_is_documented(self):
     result = CliRunner().invoke(build_image, ["--help"])
     self.assertEqual(result.exit_code, 0, result.output)
-    # Click wraps help text, so compare against a single-line version.
-    help_text = " ".join(result.output.split())
-    for package in ("uv", "cloudpickle", "google-cloud-storage", "absl-py"):
-      self.assertIn(package, help_text)
-    self.assertIn("remote_runner.py", help_text)
+    self.assertIn("--dockerfile", result.output)
 
 
 class TestIsArRepo(absltest.TestCase):

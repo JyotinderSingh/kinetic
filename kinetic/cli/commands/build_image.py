@@ -217,9 +217,10 @@ def _prompt_categories():
   "--dockerfile",
   type=click.Path(exists=True, dir_okay=False),
   default=None,
-  help="Path to a custom Dockerfile. When set, it is used instead of the "
-  "auto-generated one. The Dockerfile must install uv, cloudpickle, "
-  "google-cloud-storage, absl-py, and COPY remote_runner.py to /app/.",
+  help="Path to a custom Dockerfile. Kinetic uses this Dockerfile instead "
+  "of the auto-generated one. The Dockerfile must install uv, cloudpickle, "
+  "google-cloud-storage, and absl-py. It must also copy remote_runner.py "
+  "to /app/.",
 )
 @click.option(
   "--update-credentials",
