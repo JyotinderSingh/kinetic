@@ -309,18 +309,19 @@ capacity for interactive work.
 ## Automated environments
 
 A blocking call with `debug=True` needs an interactive terminal. If
-`stdin` is not a TTY (CI, `nohup`, piped input), the call raises
-`RuntimeError`. Kinetic runs this check before it submits the job, so
-no job starts on the cluster. Without this check, the job would wait
-the full attach window for a debugger that cannot attach, and then run
-the function.
+`stdin` is not a TTY (CI, `nohup`, or piped input), the client raises a
+`RuntimeError`. The client raises the error before it submits the job,
+so no job starts in the cluster. Without this check, the job waits the
+full attach window for a debugger that cannot attach. Then the job runs
+your function without a debugger.
 
-For automation, use `run_async()`. The detached call does not check the
-terminal. Attach later with `kinetic jobs debug <job_id>` from an
-interactive shell, or let the job run without a debugger.
+For automation, use `run_async()`. The detached call has no TTY
+requirement. Submit the job from any environment. Then attach with
+`kinetic jobs debug <job_id>` from an interactive shell when you are
+ready, or let the job run without a debugger.
 
-To permit a blocking debug call without a TTY, set
-`KINETIC_NO_TTY_DEBUG=1` in the environment of the process. See
+To override the check, set `KINETIC_NO_TTY_DEBUG=1` in the environment
+of the process. This variable is for automated tests. See
 [Configuration](../configuration.md).
 
 ## Related pages
