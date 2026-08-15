@@ -91,9 +91,9 @@ through these steps:
 ```python
 {
   "success": bool,
-  "result": Any,          # if success is True
-  "exception": Exception, # if success is False
-  "traceback": str,       # if success is False
+  "result": Any,  # if success is True
+  "exception": Exception,  # if success is False
+  "traceback": str,  # if success is False
 }
 ```
 

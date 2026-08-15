@@ -38,8 +38,7 @@ example. Pass `output_dir=` to the decorator:
 
 ```python
 @kinetic.run(accelerator="cpu", output_dir="gs://my-bucket/runs/exp-01")
-def train():
-  ...
+def train(): ...
 ```
 
 See [Resume a job from a checkpoint](#resume-a-job-from-a-checkpoint)
@@ -138,8 +137,7 @@ set a fixed directory:
      accelerator="tpu-v5litepod-4",
      output_dir="gs://my-bucket/runs/exp-01",
    )
-   def train():
-     ...
+   def train(): ...
 
 
    train()  # writes checkpoints under gs://my-bucket/runs/exp-01

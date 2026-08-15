@@ -160,14 +160,12 @@ Spot use in Kinetic has two parts. Both parts are necessary.
 
    ```python
    @kinetic.run(accelerator="gpu-a100", spot=True)
-   def train():
-     ...
+   def train(): ...
    ```
 
    ```python
    @kinetic.run(accelerator="gpu-a100:spot")
-   def train():
-     ...
+   def train(): ...
    ```
 
 The job side adds the Spot node selector and the Spot toleration to the
