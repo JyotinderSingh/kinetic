@@ -283,7 +283,7 @@ class TestWorkerResults(FakeGcsTestCase):
       {
         3: self._failure(3, "host 3 exploded"),
         1: self._failure(1, "host 1 exploded"),
-        2: {"success": True, "result": None, "host_index": 2},
+        10: self._failure(10, "host 10 exploded"),
       },
     )
     handle = _make_handle(bucket, job_id=self.JOB_ID, backend="pathways")
@@ -294,8 +294,23 @@ class TestWorkerResults(FakeGcsTestCase):
     self.assertIn("host 1 exploded", str(error))
     notes = "\n".join(error.__notes__)
     self.assertIn("Reported by host 1", notes)
-    # Host 2 succeeded, so only host 3 is listed alongside.
-    self.assertIn("Other hosts that also failed: 3", notes)
+    self.assertIn("Other hosts that also reported a failure: 3, 10", notes)
+
+  def test_handle_skips_a_leading_payload_it_cannot_read(self):
+    """A corrupt lowest-index blob must not hide the next host's error."""
+    bucket = self.make_bucket()
+    self.server.write_blob(
+      bucket,
+      storage.worker_result_blob_name(self.JOB_ID, 1),
+      b"\x80\x05not-a-valid-pickle",
+    )
+    self._seed(bucket, {2: self._failure(2, "host 2 exploded")})
+    handle = _make_handle(bucket, job_id=self.JOB_ID, backend="pathways")
+
+    error = handle._worker_failure_error()
+
+    self.assertIsInstance(error, ValueError)
+    self.assertIn("host 2 exploded", str(error))
 
   def test_handle_reports_nothing_when_no_host_failed(self):
     bucket = self.make_bucket()

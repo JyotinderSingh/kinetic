@@ -1091,7 +1091,41 @@ class TestMultiHostResultAggregation(absltest.TestCase):
 
     self.assertIn("host 1 exploded", str(raised.exception))
     notes = "\n".join(raised.exception.__notes__)
-    self.assertIn("Other hosts that also failed: 3", notes)
+    self.assertIn("Other hosts that also reported a failure: 3", notes)
+
+  def test_only_the_reported_payload_is_downloaded(self):
+    """One collective timeout leaves a payload on every host of a slice.
+
+    Naming the others needs their index, which the listing already
+    gives, so only the payload that is re-raised is fetched.
+    """
+    handle = self._make_handle()
+    list_patch, download_patch = self._seed_worker_results(
+      {
+        index: self._failure_payload(index, f"host {index}")
+        for index in range(1, 33)
+      }
+    )
+
+    with (
+      mock.patch.object(handle, "status", return_value=JobStatus.FAILED),
+      mock.patch.object(
+        handle,
+        "_download_result_payload_with_backoff",
+        return_value={"success": True, "result": 42},
+      ),
+      list_patch,
+      download_patch as mock_download,
+      mock.patch.object(handle, "cleanup"),
+      self.assertRaises(ValueError) as raised,
+    ):
+      handle.result()
+
+    self.assertIn("host 1", str(raised.exception))
+    mock_download.assert_called_once()
+    notes = "\n".join(raised.exception.__notes__)
+    self.assertIn("Other hosts that also reported a failure: 2, 3", notes)
+    self.assertIn("32.", notes)
 
   def test_successful_worker_payloads_are_not_treated_as_failures(self):
     handle = self._make_handle()
@@ -1330,9 +1364,9 @@ class TestMultiHostResultAggregation(absltest.TestCase):
       mock_download.side_effect = _tracking(
         mock_download.side_effect, downloaded
       )
-      failures = handle._worker_failures()
+      error = handle._worker_failure_error()
 
-    self.assertEqual(len(failures), 1)
+    self.assertIn("boom", str(error))
     self.assertTrue(downloaded)
     for path in downloaded:
       self.assertFalse(os.path.exists(path))

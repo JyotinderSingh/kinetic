@@ -314,18 +314,18 @@ class JobHandle:
         )
     return payload if isinstance(payload, dict) else None
 
-  def _worker_failures(self) -> list[tuple[int, str, dict[str, Any]]]:
-    """Return the failure payloads written by this job's non-leader hosts.
+  def _list_worker_results(self) -> list[tuple[int, str]]:
+    """Return the per-host result blobs this job left behind.
 
     Returns:
-      `(host_index, blob_name, payload)` triples ordered by host index.
-      Empty for single-pod backends, for jobs whose hosts all completed,
+      `(host_index, blob_name)` pairs ordered by host index.  Empty for
+      single-pod backends, for jobs whose non-leader hosts all completed,
       and whenever the listing itself could not be performed.
     """
     if not self._is_multi_host:
       return []
     try:
-      entries = storage.list_worker_results(
+      return storage.list_worker_results(
         self.bucket_name, self.job_id, project=self.project
       )
     except Exception as e:
@@ -336,13 +336,6 @@ class JobHandle:
       )
       return []
 
-    failures = []
-    for host_index, blob_name in entries:
-      payload = self._download_worker_payload(blob_name)
-      if payload is not None and not payload.get("success"):
-        failures.append((host_index, blob_name, payload))
-    return failures
-
   def _worker_failure_error(self) -> BaseException | None:
     """Return the exception reported by the lowest-indexed failing host.
 
@@ -350,24 +343,36 @@ class JobHandle:
     that surfaces locally is decided by host index rather than by
     whichever pod wrote to GCS last.
 
+    Only the payload that is actually re-raised is downloaded.  A
+    non-leader writes its blob solely to report a failure, so the later
+    entries need no download to be named — which matters on a slice
+    where one collective timeout leaves a payload on every host.
+
     Returns:
       The remote exception to re-raise, or None when no host reported
       one (single-pod backends, an unreachable bucket, or payloads this
       client cannot deserialize).
     """
-    failures = self._worker_failures()
-    if not failures:
-      return None
-    host_index, blob_name, payload = failures[0]
-    exception = self._remote_failure(payload, self._blob_uri(blob_name))
-    note = (
-      f"Reported by host {host_index} of multi-host job {self.job_id} "
-      f"({self._blob_uri(blob_name)})."
-    )
-    others = [str(index) for index, _, _ in failures[1:]]
-    if others:
-      note += f" Other hosts that also failed: {', '.join(others)}."
-    return _attach_note(exception, note)
+    entries = self._list_worker_results()
+    for position, (host_index, blob_name) in enumerate(entries):
+      payload = self._download_worker_payload(blob_name)
+      # A non-leader writes this blob only to report a failure, so a
+      # payload claiming success is not something the runner produces.
+      # Skip it rather than report a success as the job's failure.
+      if payload is None or payload.get("success"):
+        continue
+      exception = self._remote_failure(payload, self._blob_uri(blob_name))
+      note = (
+        f"Reported by host {host_index} of multi-host job {self.job_id} "
+        f"({self._blob_uri(blob_name)})."
+      )
+      others = [str(index) for index, _ in entries[position + 1 :]]
+      if others:
+        note += (
+          f" Other hosts that also reported a failure: {', '.join(others)}."
+        )
+      return _attach_note(exception, note)
+    return None
 
   def _missing_result_error(self, status: JobStatus) -> RuntimeError:
     """Return a clear failure for terminal jobs without a result payload."""
