@@ -132,7 +132,7 @@ def train(): ...
 
 Your custom image must:
 
-1. Include `cloudpickle`, `google-cloud-storage`, and a compatible Python environment.
+1. Include `cloudpickle`, `google-cloud-storage`, `absl-py`, and a compatible Python environment.
 2. Include the necessary dependencies for your function.
 3. Be accessible from the GKE nodes (e.g., Artifact Registry in the same GCP project, or a public registry).
 
@@ -173,7 +173,7 @@ kinetic build-image --repo myuser/kinetic --tag v2.0.0
 | `--repo`               | Image repository (Docker Hub or Artifact Registry). Omit to select interactively.                                              |
 | `--category`           | Accelerator categories to build: `cpu`, `gpu`, `tpu` (default: all). Repeatable.                                               |
 | `--tag`                | Image version tag (default: kinetic package version).                                                                          |
-| `--dockerfile`         | Path to a custom Dockerfile. Must install `uv`, `cloudpickle`, `google-cloud-storage`, and `COPY remote_runner.py` to `/app/`. |
+| `--dockerfile`         | Path to a custom Dockerfile. Must install `uv`, `cloudpickle`, `google-cloud-storage`, `absl-py`, and `COPY remote_runner.py` to `/app/`. |
 | `--update-credentials` | Re-enter Docker Hub credentials even if they already exist in Secret Manager.                                                  |
 | `--yes`, `-y`          | Skip confirmation prompt.                                                                                                      |
 | `--project`            | GCP project ID (default: `KINETIC_PROJECT`).                                                                                   |

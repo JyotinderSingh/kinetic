@@ -219,7 +219,7 @@ def _prompt_categories():
   default=None,
   help="Path to a custom Dockerfile. When set, it is used instead of the "
   "auto-generated one. The Dockerfile must install uv, cloudpickle, "
-  "google-cloud-storage, and COPY remote_runner.py to /app/.",
+  "google-cloud-storage, absl-py, and COPY remote_runner.py to /app/.",
 )
 @click.option(
   "--update-credentials",

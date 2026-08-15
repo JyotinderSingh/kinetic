@@ -70,11 +70,11 @@ is the Kinetic cluster name (from `KINETIC_CLUSTER`, defaulting to
 across all jobs submitted to that cluster.
 
 You can override it per job by passing `output_dir=` to the decorator,
-setting `KINETIC_OUTPUT_DIR` in your local environment before
-submission, or (when inspecting an existing job from the CLI) passing
-`--output-dir` to the relevant `kinetic jobs` subcommand. See the
-precedence table in [Configuration](../configuration.md) for how these
-resolution paths combine.
+or by setting `KINETIC_OUTPUT_DIR` in your local environment before
+submission. Both are read at submit time, so the value is fixed for the
+life of the job. See the precedence table in
+[Configuration](../configuration.md) for how these resolution paths
+combine.
 
 ## Recommended directory layout
 

@@ -128,7 +128,7 @@ class TestJobContext(absltest.TestCase):
     }
     with (
       mock.patch.dict(os.environ, env, clear=True),
-      self.assertRaisesRegex(ValueError, "project must be specified"),
+      self.assertRaisesRegex(ValueError, "No GCP project configured"),
     ):
       JobContext.from_params(
         func=self._make_func(),
