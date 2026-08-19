@@ -1,11 +1,13 @@
-"""Tests for kinetic.cli.output — LiveOutputPanel."""
+"""Tests for kinetic.cli.output — LiveOutputPanel and state rendering."""
 
+import io
 from unittest import mock
 
-from absl.testing import absltest
+from absl.testing import absltest, parameterized
 from rich.console import Console
 from rich.text import Text
 
+from kinetic.cli import output
 from kinetic.cli.output import LiveOutputPanel
 
 
@@ -102,6 +104,100 @@ class TransientBehaviorTest(absltest.TestCase):
       raise TypeError("bad")
 
     self.assertTrue(panel._has_error)
+
+
+def _gpu_export(**overrides):
+  """A GPU entry as written by program._export_stack_outputs."""
+  return {
+    "type": "GPU",
+    "name": "a100",
+    "count": 1,
+    "machine_type": "a2-highgpu-1g",
+    "node_pool": "gpu-a100-abcd",
+    "node_count": 1,
+    "min_nodes": 0,
+    "spot": False,
+    "reservation": None,
+  } | overrides
+
+
+def _render(outputs):
+  """Render infrastructure_state to plain text.
+
+  The table is wide so values are not truncated mid-word.
+  """
+  console = Console(file=io.StringIO(), width=200, record=True)
+  with mock.patch.object(output, "console", console):
+    output.infrastructure_state(
+      {key: mock.MagicMock(value=value) for key, value in outputs.items()}
+    )
+  return console.export_text()
+
+
+class InfrastructureStateAcceleratorTest(parameterized.TestCase):
+  """`pool list` and `status` must show how a pool was provisioned.
+
+  Spot and reservation change what a pool costs and whether it can be
+  preempted, so they belong in the state table alongside machine type.
+  """
+
+  @parameterized.named_parameters(
+    dict(testcase_name="spot", spot=True, expected="Spot"),
+    dict(testcase_name="on_demand", spot=False, expected="On-demand"),
+  )
+  def test_shows_provisioning_model(self, spot, expected):
+    text = _render({"accelerators": [_gpu_export(spot=spot)]})
+
+    self.assertIn("Provisioning", text)
+    self.assertIn(expected, text)
+
+  def test_shows_reservation(self):
+    text = _render({"accelerators": [_gpu_export(reservation="my-res")]})
+
+    self.assertIn("Reservation", text)
+    self.assertIn("my-res", text)
+
+  def test_omits_reservation_row_when_unset(self):
+    text = _render({"accelerators": [_gpu_export()]})
+
+    self.assertNotIn("Reservation", text)
+
+  def test_omits_unknown_fields_from_legacy_export(self):
+    """Pre-export stacks record neither field, so claim neither."""
+    entry = _gpu_export()
+    legacy = {
+      k: v for k, v in entry.items() if k not in ("spot", "reservation")
+    }
+
+    text = _render({"accelerators": [legacy]})
+
+    self.assertNotIn("Provisioning", text)
+    self.assertNotIn("Reservation", text)
+
+  def test_each_pool_shows_its_own_settings(self):
+    text = _render(
+      {
+        "accelerators": [
+          _gpu_export(node_pool="gpu-a100-abcd", spot=True),
+          _gpu_export(node_pool="gpu-a100-ef01", reservation="my-res"),
+        ]
+      }
+    )
+
+    self.assertIn("Spot", text)
+    self.assertIn("On-demand", text)
+    self.assertIn("my-res", text)
+
+  def test_legacy_single_accelerator_output(self):
+    text = _render({"accelerator": _gpu_export(spot=True)})
+
+    self.assertIn("Provisioning", text)
+    self.assertIn("Spot", text)
+
+  def test_no_pools(self):
+    text = _render({"accelerators": []})
+
+    self.assertIn("CPU only", text)
 
 
 if __name__ == "__main__":

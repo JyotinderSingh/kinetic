@@ -161,6 +161,27 @@ class TestBuildImageCommand(absltest.TestCase):
     mock_build.assert_not_called()
 
 
+class TestDockerfileHelp(absltest.TestCase):
+  def test_lists_every_runtime_import_of_remote_runner(self):
+    """A custom Dockerfile must cover remote_runner.py's module-level imports.
+
+    Missing any of these fails the pod at startup, before the payload
+    is even unpickled, so the help text has to name all of them.
+    """
+    # Assert on the authored string, not `--help` output: Click wraps at
+    # hyphens, so a rendered "google-cloud-storage" can arrive split
+    # across two lines.
+    param = next(p for p in build_image.params if p.name == "dockerfile")
+    for package in ("uv", "cloudpickle", "google-cloud-storage", "absl-py"):
+      self.assertIn(package, param.help)
+    self.assertIn("remote_runner.py", param.help)
+
+  def test_dockerfile_flag_is_documented(self):
+    result = CliRunner().invoke(build_image, ["--help"])
+    self.assertEqual(result.exit_code, 0, result.output)
+    self.assertIn("--dockerfile", result.output)
+
+
 class TestIsArRepo(absltest.TestCase):
   def test_detects_ar_uri(self):
     self.assertTrue(_is_ar_repo("us-docker.pkg.dev/proj/my-repo"))

@@ -19,6 +19,13 @@ from kinetic.data import Data
 _cached_clients: dict[str | None, storage.Client] = {}
 _client_lock = threading.Lock()
 
+# Per-host failure payloads uploaded by the non-leader hosts of a
+# multi-host job, alongside the leader's `result.pkl`.  Kept in sync with
+# `_WORKER_RESULT_TEMPLATE` in `kinetic/runner/remote_runner.py`, which
+# ships standalone inside the container and cannot import this module.
+WORKER_RESULT_PREFIX = "result-worker-"
+WORKER_RESULT_SUFFIX = ".pkl"
+
 
 def _get_client(project: str | None) -> storage.Client:
   """Return a cached storage client for the given project."""
@@ -186,6 +193,82 @@ def download_result(
   blob.download_to_filename(local_path)
   logging.info(
     "Downloaded result from gs://%s/%s/result.pkl", bucket_name, job_id
+  )
+
+  return local_path
+
+
+def worker_result_blob_name(job_id: str, host_index: int) -> str:
+  """Return the blob path host *host_index* writes its failure payload to."""
+  return f"{job_id}/{WORKER_RESULT_PREFIX}{host_index}{WORKER_RESULT_SUFFIX}"
+
+
+def _parse_worker_result_index(blob_name: str, job_id: str) -> int | None:
+  """Return the host index encoded in *blob_name*, or None if it has none."""
+  prefix = f"{job_id}/{WORKER_RESULT_PREFIX}"
+  if not blob_name.startswith(prefix) or not blob_name.endswith(
+    WORKER_RESULT_SUFFIX
+  ):
+    return None
+  raw = blob_name[len(prefix) : -len(WORKER_RESULT_SUFFIX)]
+  try:
+    return int(raw)
+  except ValueError:
+    return None
+
+
+def list_worker_results(
+  bucket_name: str, job_id: str, project: str | None = None
+) -> list[tuple[int, str]]:
+  """List the per-host result payloads a multi-host job left behind.
+
+  Args:
+      bucket_name: Name of the GCS bucket.
+      job_id: Unique job identifier.
+      project: GCP project ID (optional, uses env vars if not provided).
+
+  Returns:
+      `(host_index, blob_name)` pairs sorted by host index, so callers
+      report a deterministic "first" failing host rather than whichever
+      pod happened to upload last.  Blobs whose name carries no usable
+      index are skipped.
+  """
+  _, bucket = _get_bucket(bucket_name, project)
+  found: list[tuple[int, str]] = []
+  for blob in bucket.list_blobs(prefix=f"{job_id}/{WORKER_RESULT_PREFIX}"):
+    host_index = _parse_worker_result_index(blob.name, job_id)
+    if host_index is None:
+      logging.warning(
+        "Ignoring unrecognized per-host result blob gs://%s/%s",
+        bucket_name,
+        blob.name,
+      )
+      continue
+    found.append((host_index, blob.name))
+  return sorted(found)
+
+
+def download_worker_result(
+  bucket_name: str, blob_name: str, project: str | None = None
+) -> str:
+  """Download one per-host result payload.
+
+  Args:
+      bucket_name: Name of the GCS bucket.
+      blob_name: Full blob path, as returned by `list_worker_results`.
+      project: GCP project ID (optional, uses env vars if not provided).
+
+  Returns:
+      Local path to the downloaded payload.
+  """
+  _, bucket = _get_bucket(bucket_name, project)
+
+  blob = bucket.blob(blob_name)
+  fd, local_path = tempfile.mkstemp(suffix=".pkl", prefix="result-worker-")
+  os.close(fd)
+  blob.download_to_filename(local_path)
+  logging.info(
+    "Downloaded per-host result from gs://%s/%s", bucket_name, blob_name
   )
 
   return local_path

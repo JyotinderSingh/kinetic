@@ -42,8 +42,10 @@ def get_required_project(project: str | None = None) -> str:
   project = project or get_default_project()
   if not project:
     raise ValueError(
-      "project must be specified or set KINETIC_PROJECT "
-      "(or GOOGLE_CLOUD_PROJECT) environment variable"
+      "No GCP project configured. Run 'kinetic init' to save an active "
+      "profile, or override it by passing project= (CLI: --project) or "
+      "by setting the KINETIC_PROJECT (or GOOGLE_CLOUD_PROJECT) "
+      "environment variable"
     )
   return project
 

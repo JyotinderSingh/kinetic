@@ -9,6 +9,7 @@ from kinetic.constants import (
   DEFAULT_REGION,
   DEFAULT_ZONE,
   get_default_zone,
+  get_required_project,
   zone_to_ar_location,
   zone_to_region,
 )
@@ -116,6 +117,29 @@ _VALID_AR_LOCATIONS = {
   "northamerica-south1",
   "southamerica-west1",
 }
+
+
+class TestGetRequiredProject(absltest.TestCase):
+  def test_returns_explicit_project(self):
+    self.assertEqual(get_required_project("explicit"), "explicit")
+
+  def test_falls_back_to_env(self):
+    with mock.patch.dict(
+      os.environ, {"KINETIC_PROJECT": "from-env"}, clear=True
+    ):
+      self.assertEqual(get_required_project(), "from-env")
+
+  def test_error_points_at_kinetic_init_first(self):
+    with (
+      mock.patch.dict(os.environ, {}, clear=True),
+      self.assertRaises(ValueError) as ctx,
+    ):
+      get_required_project()
+    message = str(ctx.exception)
+    self.assertIn("kinetic init", message)
+    self.assertIn("project=", message)
+    self.assertIn("KINETIC_PROJECT", message)
+    self.assertIn("GOOGLE_CLOUD_PROJECT", message)
 
 
 class TestAllZonesMapping(absltest.TestCase):

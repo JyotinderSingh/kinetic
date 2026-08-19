@@ -36,7 +36,7 @@ Batched Jobs
 .. autofunction:: kinetic.collections.map
 
 .. autoclass:: BatchHandle
-   :members: statuses, status_counts, wait, as_completed, results, failures, cancel, cleanup
+   :members: statuses, status_counts, wait, as_completed, results, failures, submission_failures, unavailable_children, cancel, cleanup
    :show-inheritance:
 
 .. autoclass:: BatchError

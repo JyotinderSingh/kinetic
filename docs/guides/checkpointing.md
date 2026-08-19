@@ -118,43 +118,38 @@ read the bucket metadata.
 
 ## Resume a job from a checkpoint
 
-A job can stop before the work is done: Google Cloud preempts a Spot
-node, a node fails, or your code raises an error. Kinetic does not submit
-the job again for you. The checkpoints that the job wrote stay in Cloud
-Storage. To continue the work, submit the function again with the
-**same** output directory. Your code then finds the latest checkpoint
-under that directory and continues from that checkpoint.
+A job can stop before the work is done: Google Cloud preempts a Spot node, a node fails, or your code raises an error. Kinetic does not submit the job again for you. The checkpoints that the job wrote stay in Cloud Storage. To continue the work, submit the function again with the **same** output directory. Your code then finds the latest checkpoint under that directory and continues from that checkpoint.
 
-The output directory must be the same for each call. With the default
-output directory, each call gets a new job ID and therefore a new, empty
-prefix. The second call then starts from step 0. There are two ways to
-set a fixed directory:
+The output directory must be the same for each call. With the default output directory, each call gets a new job ID and therefore a new, empty prefix. The second call then starts from step 0. There are two ways to set a fixed directory:
 
 1. Pass `output_dir=` to the decorator:
+```python
+@kinetic.run(
+  accelerator="tpu-v5litepod-4",
+  output_dir="gs://my-bucket/runs/exp-01",
+)
+def train(): ...
 
-   ```python
-   @kinetic.run(
-     accelerator="tpu-v5litepod-4",
-     output_dir="gs://my-bucket/runs/exp-01",
-   )
-   def train(): ...
+
+train()  # writes checkpoints under gs://my-bucket/runs/exp-01
+train()  # finds them and resumes
+
+```
 
 
-   train()  # writes checkpoints under gs://my-bucket/runs/exp-01
-   train()  # finds them and resumes
-   ```
+2. Set `KINETIC_OUTPUT_DIR` in your local environment before both submissions:
+```bash
+export KINETIC_OUTPUT_DIR=gs://my-bucket/runs/exp-01
+python train.py   # first run
+python train.py   # resumes
 
-2. Export `KINETIC_OUTPUT_DIR` before both submissions:
+```
 
-   ```bash
-   export KINETIC_OUTPUT_DIR=gs://my-bucket/runs/exp-01
-   python train.py   # first run
-   python train.py   # resumes
-   ```
 
-A path in the jobs bucket also works, for example
-`gs://my-project-kn-kinetic-cluster-jobs/outputs/exp-01`, and needs no
-extra access grant. The 30-day rule of that bucket applies (see below).
+
+Kinetic reads both sources at submit time, so the output directory does not change while the job runs. The precedence table in [Configuration](https://www.google.com/search?q=../configuration.md) shows how these sources combine.
+
+A path in the jobs bucket also works, for example `gs://my-project-kn-kinetic-cluster-jobs/outputs/exp-01`, and needs no extra access grant. The 30-day rule of that bucket applies (see below).
 
 ## Recommended directory layout
 

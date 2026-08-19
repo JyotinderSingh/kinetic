@@ -224,6 +224,18 @@ Remove each pool that you no longer use:
 kinetic pool remove tpu-v5litepod-1a2b
 ```
 
+### Verify the Provisioning Model
+
+Kinetic records the Spot setting in the cluster state. Later `kinetic pool add`, `kinetic pool remove`, and `kinetic up` commands keep the setting on the pool.
+
+To see the provisioning model of each pool, run `kinetic pool list`. The `Provisioning` row shows `Spot` or `On-demand`.
+
+:::{note}
+Kinetic records the Spot setting when it creates the pool. A pool from an earlier version of Kinetic has no such record, and the `Provisioning` row is absent. The next `kinetic pool add` or `kinetic pool remove` command rebuilds that pool as on-demand. To keep Spot capacity, remove the pool and add it again with `--spot`.
+:::
+
+---
+
 ## Delete the cluster
 
 If you do not use Kinetic for days or weeks, delete the cluster:

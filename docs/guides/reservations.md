@@ -125,6 +125,19 @@ kinetic pool add \
   --accelerator tpu-v6e-16 \
   --reservation my-v6e-reservation
 ```
+## Verify the Reservation
+
+Kinetic records the reservation in the cluster state. Later `kinetic pool add`, `kinetic pool remove`, and `kinetic up` commands keep the reservation on the pool.
+
+To see the reservation of each pool, run:
+
+```bash
+kinetic pool list --project your-project-id
+```
+
+The `Reservation` row shows the reservation name. Kinetic does not show this row for a pool that uses on-demand or Spot capacity.
+
+## Cleaning Up
 
 The `KINETIC_RESERVATION` environment variable sets the same value for
 one command. See [Configuration](../configuration.md).

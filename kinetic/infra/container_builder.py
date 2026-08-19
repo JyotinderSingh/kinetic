@@ -854,7 +854,8 @@ def build_and_push_prebuilt_image(
   dependencies (JAX + keras + cloudpickle + google-cloud-storage) is
   auto-generated.  A custom *dockerfile* is used verbatim — the caller
   must ensure it installs `uv`, `cloudpickle`,
-  `google-cloud-storage` and copies `remote_runner.py` to
+  `google-cloud-storage`, `absl-py` (all imported by
+  `remote_runner.py` at module load) and copies `remote_runner.py` to
   `/app/remote_runner.py`.
 
   For Docker Hub, credentials are read from GCP Secret Manager

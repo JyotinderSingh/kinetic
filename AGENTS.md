@@ -252,7 +252,29 @@ Images are tagged with `SHA256(base_image + accelerator_type + requirements.txt 
   "result": Any,  # if success=True
   "exception": Exception,  # if success=False
   "traceback": str,  # if success=False
+  "host_index": int,  # process index of the pod that wrote it
 }
 ```
 
 Exceptions are re-raised locally with the original traceback.
+
+### Multi-host result ownership
+
+Every pod of a Pathways job is launched with the same command, so the
+runner decides ownership from its process index (`TPU_WORKER_ID`, with
+`LWS_WORKER_INDEX` as fallback; absent means single-host, index 0):
+
+- The leader (index 0) writes `{job_id}/result.pkl` — the only payload
+  `JobHandle.result()` returns a value from.
+- A non-leader writes `{job_id}/result-worker-{index}.pkl` **only when it
+  fails**; on success it discards its return value without serializing it.
+- `JobHandle._worker_failure_error()` lists those blobs
+  (`storage.list_worker_results`) and re-raises the lowest-indexed host's
+  exception when the leader claims success on a FAILED job, or when the
+  leader wrote no payload at all. Pod exit summaries remain the fallback
+  for hosts killed before they could report.
+
+The blob naming lives in two places on purpose: `_WORKER_RESULT_TEMPLATE`
+in `runner/remote_runner.py` (which ships standalone in the container and
+cannot import kinetic) and `worker_result_blob_name()` in
+`utils/storage.py`. Keep them in sync.

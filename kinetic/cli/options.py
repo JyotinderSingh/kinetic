@@ -72,7 +72,7 @@ def force_destroy_option(f):
 def jobs_options(f):
   """Shared options for ``kinetic jobs`` subcommands.
 
-  Extends ``common_options`` with ``--namespace`` and `--output-dir`.
+  Extends ``common_options`` with ``--namespace``.
   """
   f = common_options(f)
   f = click.option(
@@ -81,11 +81,5 @@ def jobs_options(f):
     default="default",
     show_default=True,
     help="Kubernetes namespace [env: KINETIC_NAMESPACE]",
-  )(f)
-  f = click.option(
-    "--output-dir",
-    envvar="KINETIC_OUTPUT_DIR",
-    default=None,
-    help="Output directory [env: KINETIC_OUTPUT_DIR]",
   )(f)
   return f

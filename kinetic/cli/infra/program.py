@@ -459,11 +459,14 @@ def _create_accelerator_pools(
   zone: str,
   project_id: str,
   service_account: pulumi.Output[str],
-) -> list[tuple[GpuConfig | TpuConfig, gcp.container.NodePool, int]]:
-  """Create accelerator node pools and return entries for export."""
-  pool_entries: list[
-    tuple[GpuConfig | TpuConfig, gcp.container.NodePool, int]
-  ] = []
+) -> list[tuple[NodePoolConfig, gcp.container.NodePool]]:
+  """Create accelerator node pools and return entries for export.
+
+  Each entry pairs the requesting ``NodePoolConfig`` with the created
+  pool, so the stack export can record every setting that was applied —
+  not just the accelerator shape.
+  """
+  pool_entries: list[tuple[NodePoolConfig, gcp.container.NodePool]] = []
   for np in node_pools:
     accel = np.accelerator
     if isinstance(accel, GpuConfig):
@@ -490,7 +493,7 @@ def _create_accelerator_pools(
       )
     else:
       continue
-    pool_entries.append((accel, pool, np.min_nodes))
+    pool_entries.append((np, pool))
   return pool_entries
 
 
@@ -502,10 +505,16 @@ def _export_stack_outputs(
   repo: gcp.artifactregistry.Repository,
   ar_location: str,
   cluster_name: str,
-  pool_entries: list[tuple[GpuConfig | TpuConfig, gcp.container.NodePool, int]],
+  pool_entries: list[tuple[NodePoolConfig, gcp.container.NodePool]],
   force_destroy: bool,
 ) -> None:
-  """Export all Pulumi stack outputs."""
+  """Export all Pulumi stack outputs.
+
+  The per-pool ``accelerators`` entries are the only record of how each
+  pool was provisioned: ``load_state()`` reads them back and re-declares
+  every pool on the next update. Any setting missing here is silently
+  reset to its default the next time a pool is added or removed.
+  """
   pulumi.export("project", project_id)
   pulumi.export("zone", zone)
   pulumi.export("cluster_name", cluster.name)
@@ -524,22 +533,25 @@ def _export_stack_outputs(
     return
 
   export_outputs = []
-  for accel, pool, min_nodes in pool_entries:
+  for np, pool in pool_entries:
+    accel = np.accelerator
     if isinstance(accel, GpuConfig):
       entry = pool.name.apply(
-        lambda pn, a=accel, mn=min_nodes: {
+        lambda pn, a=accel, cfg=np: {
           "type": "GPU",
           "name": a.name,
           "count": a.count,
           "machine_type": a.machine_type,
           "node_pool": pn,
           "node_count": 1,
-          "min_nodes": mn,
+          "min_nodes": cfg.min_nodes,
+          "spot": a.spot,
+          "reservation": cfg.reservation,
         }
       )
     else:  # TpuConfig
       entry = pool.name.apply(
-        lambda pn, a=accel, mn=min_nodes: {
+        lambda pn, a=accel, cfg=np: {
           "type": "TPU",
           "name": a.name,
           "chips": a.chips,
@@ -547,7 +559,9 @@ def _export_stack_outputs(
           "machine_type": a.machine_type,
           "node_pool": pn,
           "node_count": a.num_nodes,
-          "min_nodes": mn,
+          "min_nodes": cfg.min_nodes,
+          "spot": a.spot,
+          "reservation": cfg.reservation,
         }
       )
     export_outputs.append(entry)

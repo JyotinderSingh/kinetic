@@ -171,29 +171,29 @@ that your function imports.
   container_image="us-docker.pkg.dev/my-project/kinetic/my-image:v1.0",
 )
 def train(): ...
+
 ```
 
 The image must satisfy these requirements:
 
-- The Kinetic runner script is at `/app/remote_runner.py`. Kinetic
-  starts the container with `python3 -u /app/remote_runner.py`, which
-  replaces the `ENTRYPOINT` and `CMD` of the image. Copy the script from
-  the `kinetic/runner/` directory of the installed package.
-- `python3` is on `PATH`, with the same minor version as your client.
-- The packages `cloudpickle`, `google-cloud-storage`, and `absl-py` are
-  installed. The runner imports them.
-- Every other package that your function imports is installed.
-- We recommend that `keras-kinetic` is installed. The runner does not
-  need it, but user code often imports it.
-- The GKE nodes can pull the image: Artifact Registry in the same
-  project, or a public registry.
+* The Kinetic runner script is at `/app/remote_runner.py`. Kinetic
+starts the container with `python3 -u /app/remote_runner.py`, which
+replaces the `ENTRYPOINT` and `CMD` of the image. Copy the script from
+the `kinetic/runner/` directory of the installed package.
+* `python3` is on `PATH`, with the same minor version as your client.
+* The packages `cloudpickle`, `google-cloud-storage`, and `absl-py` are
+installed. The runner imports them.
+* Every other package that your function imports is installed.
+* We recommend that `keras-kinetic` is installed. The runner does not
+need it, but user code often imports it.
+* The GKE nodes can pull the image: Artifact Registry in the same
+project, or a public registry.
 
 Kinetic still ships your project source with the job and extracts it on
 the pod. Do not copy your source into the image.
 
 **Timing:** one image pull, then the function runs. The pull time depends
 on the image size and the registry.
-
 ## `kinetic build-image`
 
 `kinetic build-image` builds base images with Cloud Build and pushes them
@@ -223,15 +223,16 @@ kinetic build-image --repo myuser/kinetic --dockerfile ./Dockerfile.custom
 kinetic build-image --repo myuser/kinetic --tag v2.0.0
 ```
 
-| Option | Description |
-| ------ | ----------- |
-| `--repo` | Image repository: Docker Hub (`myuser/kinetic`) or Artifact Registry (`us-docker.pkg.dev/...`). Omit it for interactive mode. |
-| `--category` | `cpu`, `gpu`, or `tpu`. Repeat the flag for more than one. Default: all three. |
-| `--tag` | Image tag. Default: the installed kinetic version. |
-| `--dockerfile` | A custom Dockerfile. The file must install `uv`, `cloudpickle`, `google-cloud-storage`, and `absl-py`, and copy `remote_runner.py` to `/app/`. |
-| `--update-credentials` | Ask for the Docker Hub credentials again, even if Secret Manager already has them. |
-| `--yes`, `-y` | Skip the confirmation prompt. |
-| `--project`, `--zone`, `--cluster` | The usual target flags. The build uses the builds bucket of the cluster. |
+| Option                 | Description                                                                                                                    |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `--repo`               | Image repository (Docker Hub or Artifact Registry). Omit to select interactively.                                              |
+| `--category`           | Accelerator categories to build: `cpu`, `gpu`, `tpu` (default: all). Repeatable.                                               |
+| `--tag`                | Image version tag (default: kinetic package version).                                                                          |
+| `--dockerfile`         | Path to a custom Dockerfile. The Dockerfile must install `uv`, `cloudpickle`, `google-cloud-storage`, and `absl-py`. It must also copy `remote_runner.py` to `/app/`. |
+| `--update-credentials` | Re-enter Docker Hub credentials even if they already exist in Secret Manager.                                                  |
+| `--yes`, `-y`          | Skip confirmation prompt.                                                                                                      |
+| `--project`            | GCP project ID (default: `KINETIC_PROJECT`).                                                                                   |
+| `--cluster`            | GKE cluster name (default: `kinetic-cluster`).     
 
 Registry notes:
 

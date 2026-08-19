@@ -7,6 +7,7 @@ import tempfile
 from unittest import mock
 from unittest.mock import MagicMock
 
+import cloudpickle
 from absl.testing import absltest
 from google.api_core import exceptions as google_exceptions
 
@@ -950,6 +951,436 @@ class TestResultFailurePaths(absltest.TestCase):
     mock_cleanup.assert_called_once_with(
       k8s=True, gcs=True, cleanup_timeout=180, cleanup_poll_interval=2
     )
+
+
+class TestMultiHostResultAggregation(absltest.TestCase):
+  """Per-host failure payloads decide which exception surfaces locally.
+
+  Every pod of a Pathways job runs the same command, so the leader owns
+  `result.pkl` and each non-leader host writes its own failure payload.
+  The client picks the lowest-indexed failing host, making the surfaced
+  exception deterministic instead of a race between hosts.
+  """
+
+  def _make_handle(self, backend="pathways"):
+    return JobHandle(
+      job_id="job-a1b2",
+      backend=backend,
+      project="proj",
+      cluster_name="cluster",
+      zone="us-central1-a",
+      namespace="default",
+      bucket_name="proj-kn-cluster-jobs",
+      k8s_name="keras-pathways-job-a1b2",
+      image_uri="image:tag",
+      accelerator="tpu-v6e-16",
+      func_name="train",
+      display_name="kinetic-train-job-a1b2",
+      created_at="2026-03-25T10:00:00Z",
+    )
+
+  def _seed_worker_results(self, payloads, corrupt=()):
+    """Patch storage so listing/downloading returns *payloads*.
+
+    Args:
+      payloads: `{host_index: payload dict}` written by non-leader hosts.
+      corrupt: Host indices whose blob exists but cannot be unpickled.
+
+    Returns:
+      A context manager stack entry list for `contextlib.ExitStack`.
+    """
+    tmpdir = tempfile.mkdtemp()
+    self.addCleanup(shutil.rmtree, tmpdir, True)
+
+    entries = sorted(
+      (index, f"job-a1b2/result-worker-{index}.pkl")
+      for index in {*payloads, *corrupt}
+    )
+    paths = {}
+    for index, blob_name in entries:
+      path = os.path.join(tmpdir, f"{index}.pkl")
+      with open(path, "wb") as f:
+        if index in corrupt:
+          f.write(b"\x80\x05not-a-valid-pickle")
+        else:
+          cloudpickle.dump(payloads[index], f)
+      paths[blob_name] = path
+
+    def download(bucket_name, blob_name, project=None):
+      del bucket_name, project
+      # The real helper hands back a private temp file the caller
+      # deletes; copy so a second read in one test still works.
+      copy_path = os.path.join(tmpdir, f"copy-{os.path.basename(blob_name)}")
+      shutil.copyfile(paths[blob_name], copy_path)
+      return copy_path
+
+    return (
+      mock.patch(
+        "kinetic.jobs.storage.list_worker_results", return_value=entries
+      ),
+      mock.patch(
+        "kinetic.jobs.storage.download_worker_result", side_effect=download
+      ),
+    )
+
+  def _failure_payload(self, host_index, message, phase="execute"):
+    return {
+      "success": False,
+      "result": None,
+      "exception": ValueError(message),
+      "traceback": f"Traceback: {message}",
+      "phase": phase,
+      "host_index": host_index,
+    }
+
+  def test_worker_exception_wins_over_the_leaders_false_success(self):
+    """The reported failure is the worker's error, not a pod exit code."""
+    handle = self._make_handle()
+    list_patch, download_patch = self._seed_worker_results(
+      {2: self._failure_payload(2, "worker 2 exploded")}
+    )
+
+    with (
+      mock.patch.object(handle, "status", return_value=JobStatus.FAILED),
+      mock.patch.object(
+        handle,
+        "_download_result_payload_with_backoff",
+        return_value={"success": True, "result": 42},
+      ),
+      list_patch,
+      download_patch,
+      mock.patch.object(handle, "cleanup") as mock_cleanup,
+      self.assertRaises(ValueError) as raised,
+    ):
+      handle.result()
+
+    self.assertIn("worker 2 exploded", str(raised.exception))
+    notes = "\n".join(raised.exception.__notes__)
+    self.assertIn("Reported by host 2", notes)
+    self.assertIn(
+      "gs://proj-kn-cluster-jobs/job-a1b2/result-worker-2.pkl", notes
+    )
+    self.assertIn("Traceback: worker 2 exploded", notes)
+    mock_cleanup.assert_called_once_with(
+      k8s=True, gcs=False, cleanup_timeout=180, cleanup_poll_interval=2
+    )
+
+  def test_lowest_indexed_failing_host_is_raised(self):
+    """Two hosts fail; which one surfaces must not depend on timing."""
+    handle = self._make_handle()
+    list_patch, download_patch = self._seed_worker_results(
+      {
+        3: self._failure_payload(3, "host 3 exploded"),
+        1: self._failure_payload(1, "host 1 exploded"),
+      }
+    )
+
+    with (
+      mock.patch.object(handle, "status", return_value=JobStatus.FAILED),
+      mock.patch.object(
+        handle,
+        "_download_result_payload_with_backoff",
+        return_value={"success": True, "result": 42},
+      ),
+      list_patch,
+      download_patch,
+      mock.patch.object(handle, "cleanup"),
+      self.assertRaises(ValueError) as raised,
+    ):
+      handle.result()
+
+    self.assertIn("host 1 exploded", str(raised.exception))
+    notes = "\n".join(raised.exception.__notes__)
+    self.assertIn("Other hosts that also reported a failure: 3", notes)
+
+  def test_only_the_reported_payload_is_downloaded(self):
+    """One collective timeout leaves a payload on every host of a slice.
+
+    Naming the others needs their index, which the listing already
+    gives, so only the payload that is re-raised is fetched.
+    """
+    handle = self._make_handle()
+    list_patch, download_patch = self._seed_worker_results(
+      {
+        index: self._failure_payload(index, f"host {index}")
+        for index in range(1, 33)
+      }
+    )
+
+    with (
+      mock.patch.object(handle, "status", return_value=JobStatus.FAILED),
+      mock.patch.object(
+        handle,
+        "_download_result_payload_with_backoff",
+        return_value={"success": True, "result": 42},
+      ),
+      list_patch,
+      download_patch as mock_download,
+      mock.patch.object(handle, "cleanup"),
+      self.assertRaises(ValueError) as raised,
+    ):
+      handle.result()
+
+    self.assertIn("host 1", str(raised.exception))
+    mock_download.assert_called_once()
+    notes = "\n".join(raised.exception.__notes__)
+    self.assertIn("Other hosts that also reported a failure: 2, 3", notes)
+    self.assertIn("32.", notes)
+
+  def test_successful_worker_payloads_are_not_treated_as_failures(self):
+    handle = self._make_handle()
+    list_patch, download_patch = self._seed_worker_results(
+      {1: {"success": True, "result": None, "host_index": 1}}
+    )
+
+    with (
+      mock.patch.object(handle, "status", return_value=JobStatus.FAILED),
+      mock.patch.object(
+        handle,
+        "_download_result_payload_with_backoff",
+        return_value={"success": True, "result": 42},
+      ),
+      list_patch,
+      download_patch,
+      mock.patch("kinetic.jobs.ensure_credentials"),
+      mock.patch(
+        "kinetic.jobs.k8s_utils.collect_pod_failure_details",
+        return_value="  worker-1: exit code 137",
+      ),
+      mock.patch("kinetic.jobs.k8s_utils.core_v1"),
+      mock.patch.object(handle, "cleanup"),
+      self.assertRaises(RuntimeError) as raised,
+    ):
+      handle.result()
+
+    self.assertIn("claims success", str(raised.exception))
+
+  def test_no_worker_payload_falls_back_to_pod_exit_summaries(self):
+    """A host killed by the kubelet never writes a payload."""
+    handle = self._make_handle()
+
+    with (
+      mock.patch.object(handle, "status", return_value=JobStatus.FAILED),
+      mock.patch.object(
+        handle,
+        "_download_result_payload_with_backoff",
+        return_value={"success": True, "result": 42},
+      ),
+      mock.patch("kinetic.jobs.storage.list_worker_results", return_value=[]),
+      mock.patch("kinetic.jobs.ensure_credentials"),
+      mock.patch(
+        "kinetic.jobs.k8s_utils.collect_pod_failure_details",
+        return_value="  worker-1: exit code 137",
+      ),
+      mock.patch("kinetic.jobs.k8s_utils.core_v1"),
+      mock.patch.object(handle, "cleanup"),
+      self.assertRaises(RuntimeError) as raised,
+    ):
+      handle.result()
+
+    message = str(raised.exception)
+    self.assertIn("claims success", message)
+    self.assertIn("worker-1: exit code 137", message)
+
+  def test_listing_failure_does_not_mask_the_real_error(self):
+    handle = self._make_handle()
+
+    with (
+      mock.patch.object(handle, "status", return_value=JobStatus.FAILED),
+      mock.patch.object(
+        handle,
+        "_download_result_payload_with_backoff",
+        return_value={"success": True, "result": 42},
+      ),
+      mock.patch(
+        "kinetic.jobs.storage.list_worker_results",
+        side_effect=RuntimeError("bucket unreachable"),
+      ),
+      mock.patch("kinetic.jobs.ensure_credentials"),
+      mock.patch(
+        "kinetic.jobs.k8s_utils.collect_pod_failure_details", return_value=""
+      ),
+      mock.patch("kinetic.jobs.k8s_utils.core_v1"),
+      mock.patch.object(handle, "cleanup"),
+      self.assertRaisesRegex(RuntimeError, "claims success"),
+      self.assertLogs("absl", level="WARNING") as logs,
+    ):
+      handle.result()
+
+    self.assertTrue(
+      any("Could not list per-host result payloads" in m for m in logs.output)
+    )
+
+  def test_undeserializable_worker_payload_is_skipped(self):
+    """A payload this client cannot import must not hide the next host."""
+    handle = self._make_handle()
+    list_patch, download_patch = self._seed_worker_results(
+      {3: self._failure_payload(3, "host 3 exploded")}, corrupt=(1,)
+    )
+
+    with (
+      mock.patch.object(handle, "status", return_value=JobStatus.FAILED),
+      mock.patch.object(
+        handle,
+        "_download_result_payload_with_backoff",
+        return_value={"success": True, "result": 42},
+      ),
+      list_patch,
+      download_patch,
+      mock.patch.object(handle, "cleanup"),
+      self.assertRaises(ValueError) as raised,
+      self.assertLogs("absl", level="WARNING") as logs,
+    ):
+      handle.result()
+
+    self.assertIn("host 3 exploded", str(raised.exception))
+    self.assertTrue(
+      any("Could not deserialize per-host result" in m for m in logs.output)
+    )
+
+  def test_missing_leader_result_reports_the_failing_host(self):
+    """A leader that never uploaded is explained by the host that failed."""
+    handle = self._make_handle()
+    list_patch, download_patch = self._seed_worker_results(
+      {
+        1: self._failure_payload(
+          1, "host 1 died in setup", phase="data resolve"
+        )
+      }
+    )
+
+    with (
+      mock.patch.object(handle, "status", return_value=JobStatus.FAILED),
+      mock.patch.object(
+        handle,
+        "_download_result_payload_with_backoff",
+        side_effect=google_exceptions.NotFound("no result.pkl"),
+      ),
+      list_patch,
+      download_patch,
+      mock.patch.object(handle, "cleanup") as mock_cleanup,
+      self.assertRaises(ValueError) as raised,
+    ):
+      handle.result()
+
+    self.assertIn("host 1 died in setup", str(raised.exception))
+    notes = "\n".join(raised.exception.__notes__)
+    self.assertIn("Failed during kinetic phase: data resolve", notes)
+    mock_cleanup.assert_called_once_with(
+      k8s=True, gcs=False, cleanup_timeout=180, cleanup_poll_interval=2
+    )
+
+  def test_missing_leader_result_without_host_payloads_is_unchanged(self):
+    handle = self._make_handle()
+
+    with (
+      mock.patch.object(handle, "status", return_value=JobStatus.FAILED),
+      mock.patch.object(
+        handle,
+        "_download_result_payload_with_backoff",
+        side_effect=google_exceptions.NotFound("no result.pkl"),
+      ),
+      mock.patch("kinetic.jobs.storage.list_worker_results", return_value=[]),
+      mock.patch.object(handle, "cleanup"),
+      self.assertRaisesRegex(RuntimeError, "no result payload was found"),
+    ):
+      handle.result()
+
+  def test_single_pod_backends_never_list_per_host_payloads(self):
+    """GKE jobs run one pod — the extra GCS listing would be pure waste."""
+    handle = self._make_handle(backend="gke")
+
+    with (
+      mock.patch.object(handle, "status", return_value=JobStatus.FAILED),
+      mock.patch.object(
+        handle,
+        "_download_result_payload_with_backoff",
+        return_value={"success": True, "result": 42},
+      ),
+      mock.patch("kinetic.jobs.storage.list_worker_results") as mock_list,
+      mock.patch("kinetic.jobs.ensure_credentials"),
+      mock.patch(
+        "kinetic.jobs.k8s_utils.collect_pod_failure_details", return_value=""
+      ),
+      mock.patch("kinetic.jobs.k8s_utils.core_v1"),
+      mock.patch.object(handle, "cleanup"),
+      self.assertRaisesRegex(RuntimeError, "claims success"),
+    ):
+      handle.result()
+
+    mock_list.assert_not_called()
+
+  def test_succeeded_jobs_do_not_pay_for_the_listing(self):
+    """The aggregation is a failure path; success must stay a single read."""
+    handle = self._make_handle()
+
+    with (
+      mock.patch.object(handle, "status", return_value=JobStatus.SUCCEEDED),
+      mock.patch.object(
+        handle,
+        "_download_result_payload_with_backoff",
+        return_value={"success": True, "result": 42},
+      ),
+      mock.patch("kinetic.jobs.storage.list_worker_results") as mock_list,
+      mock.patch.object(handle, "cleanup"),
+    ):
+      self.assertEqual(handle.result(), 42)
+
+    mock_list.assert_not_called()
+
+  def test_leader_failure_still_raises_the_leaders_exception(self):
+    """The leader's own error is the job's error; hosts are not consulted."""
+    handle = self._make_handle()
+
+    with (
+      mock.patch.object(handle, "status", return_value=JobStatus.FAILED),
+      mock.patch.object(
+        handle,
+        "_download_result_payload_with_backoff",
+        return_value={
+          "success": False,
+          "exception": KeyError("leader exploded"),
+          "traceback": "Traceback: leader exploded",
+          "host_index": 0,
+        },
+      ),
+      mock.patch("kinetic.jobs.storage.list_worker_results") as mock_list,
+      mock.patch.object(handle, "cleanup"),
+      self.assertRaises(KeyError) as raised,
+    ):
+      handle.result()
+
+    self.assertIn("leader exploded", str(raised.exception))
+    mock_list.assert_not_called()
+
+  def test_temporary_worker_payload_file_is_removed(self):
+    handle = self._make_handle()
+    list_patch, download_patch = self._seed_worker_results(
+      {1: self._failure_payload(1, "boom")}
+    )
+    downloaded = []
+
+    with list_patch, download_patch as mock_download:
+      mock_download.side_effect = _tracking(
+        mock_download.side_effect, downloaded
+      )
+      error = handle._worker_failure_error()
+
+    self.assertIn("boom", str(error))
+    self.assertTrue(downloaded)
+    for path in downloaded:
+      self.assertFalse(os.path.exists(path))
+
+
+def _tracking(inner, seen):
+  """Wrap a download side effect, recording the paths it hands back."""
+
+  def wrapper(*args, **kwargs):
+    path = inner(*args, **kwargs)
+    seen.append(path)
+    return path
+
+  return wrapper
 
 
 class TestResultLogStreaming(absltest.TestCase):

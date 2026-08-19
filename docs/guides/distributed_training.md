@@ -198,57 +198,100 @@ def train_data_parallel():
   model.fit(...)
 ```
 
-Two complete scripts show multi-host runs and `pathways` backend runs:
+For a richer end-to-end example using a real model, see
+[`pathways_example.py`](../examples.md) and
+[`gemma_sft_pathways_distributed.py`](../examples.md).
 
-- [`pathways_example.py`](../examples/pathways_example.md) runs on
-  `tpu-v6e-16`. The script prints the process layout, checks a
-  cross-host `psum`, and trains a small Keras model.
-- [`gemma_sft_pathways_distributed.py`](../examples/gemma_sft_pathways_distributed.md)
-  uses the `DataParallel` pattern above with a Gemma model. The script
-  runs on the single-host slice `tpu-v5litepod-2x4` with
-  `backend="pathways"`. Change the accelerator to a multi-host slice to
-  run the same code on many hosts.
+## How to think about it
+
+Each host runs its own copy of your function. JAX collectives
+(`jax.lax.psum`, sharding, `pmap`) and Keras's distribution APIs handle
+the actual cross-host communication. Kinetic's job is to:
+
+- Schedule the slice as a single logical job that the autoscaler treats
+  atomically (no split brain).
+- Run your function on every host with the right `JAX_*` env vars set.
+- Stream stdout from the **leader pod** (process index 0) back to your
+  local terminal. Other hosts' stdout is not aggregated; if you need it,
+  fetch it directly from the per-host pods (see "Debugging distributed
+  jobs" below).
+- Return only the leader process's (`jax.process_index() == 0`) value to
+  your local machine, so you do not get N copies of the result.
+- Raise the exception of the host that failed, if a host fails. The
+  next section gives the rules for the result and for the exception.
+
+## Which host reports the result
+
+All hosts run the same command. Kinetic uses the process index to decide
+which host reports the result, and which host reports an error:
+
+- **The leader writes the result.** Only process 0 writes the result
+  file for the job. You therefore always get the return value of the
+  leader. Each other host discards its own return value.
+- **Each host reports its own failure.** A host that is not the leader
+  writes a failure record. The record contains the process index of that
+  host.
+- **The failing host with the lowest index reports the error.** If the
+  leader fails, Kinetic raises the exception of the leader. If the leader
+  does not fail, Kinetic raises the exception of the failing host with
+  the lowest index. Kinetic attaches the remote traceback of that host,
+  and a note that lists each other host that also failed.
+
+A failure on one host therefore cannot make the job look successful.
+For the same failure, you always get the same local error.
+
+:::{admonition} Return values must come from process 0
+:class: tip
+
+Kinetic keeps the return value of the leader only. Put the data that you
+need on process 0 before your function returns. Use a JAX collective to
+gather sharded data, or use `jax.device_get` on a fully replicated
+array. Kinetic discards a value that only process 3 has.
+:::
+
+Some failures stop a pod before it can write a failure record. Examples
+are an out-of-memory kill, a Spot preemption, and a node eviction. The
+job still fails. In this case Kinetic has no remote traceback to show,
+and reports the exit code of each pod instead.
+
+:::{warning}
+**When not to use this:** if your model and batch fit on a single TPU
+host, stay there. Multi-host adds startup latency, requires Pathways,
+and a single host failure fails the whole slice. Move to multi-host
+only when you've outgrown one node.
+:::
 
 ## Failure modes and recovery
 
-Multi-host jobs fail in ways that single-host jobs do not. The most
-common ones, with the action for each:
+Multi-host jobs fail differently from single-host jobs. The most common
+ones, with what to actually do:
 
-- **Slow startup.** The autoscaler must start every VM of the slice, and
-  Cloud Build runs if the image is new. Do not stop the job because it
-  shows no progress. Run `kinetic jobs status <job-id>` in a second
-  terminal to see the current status. If the job stays `PENDING` for
-  more than 10 minutes, check the accelerator quota of your project. See
-  [Troubleshooting](../troubleshooting.md#scheduling-and-quota-issues).
-- **Topology mismatch.** Your code expects a device count that does not
-  match `jax.device_count()` on the slice. Symptom: shape errors inside
-  `pmap` or sharding. *Fix:* compute mesh shapes from
-  `jax.device_count()` and `jax.process_count()`. Do not hard-code them.
-- **One host hangs, the slice waits.** A host that does not reach a
-  collective stops the whole slice. The other hosts wait at the
-  collective, and the job makes no progress. *Fix:* read the log of
-  every pod with `kubectl` (see below) and find the host that diverged.
-  Common causes are uneven data loading and a Python exception on one
-  host before the collective.
-- **Spot preemption.** If Google Cloud preempts one host of a Spot slice,
-  the whole slice loses its state. The LeaderWorkerSet restart policy is
-  `RecreateGroupOnPodRestart`. The controller recreates every pod of the
-  group, and your function starts again from the beginning on every
-  host. *Fix:* use on-demand capacity for multi-host jobs, or make sure
-  that the job writes checkpoints and can resume from them.
-- **No capacity or no quota.** A multi-host slice needs several VMs of
-  one type in one zone. The job stays `PENDING` if the zone has no
-  capacity or your project has no quota. *Fix:* check the quota page in
-  the Cloud Console for the accelerator type, use a
-  [capacity reservation](reservations.md), or use a cluster in another
-  zone.
-- **A second job on the same pool waits.** By default, a multi-host node
-  pool scales up to one slice. A second job on the same accelerator
-  waits until the first job ends. *Fix:* add a second pool for the same
-  accelerator. For warm capacity, add a pool with `--min-nodes` set to a
-  multiple of the host count.
+- **Slow startup (5–10 minutes for the first multi-host run).** A fresh
+  TPU multi-host slice has to provision multiple VMs and boot Pathways.
+  This is expected; don't kill the job thinking it's stuck. If startup
+  consistently exceeds 10 minutes, run `kinetic init` and choose
+  `troubleshoot`, and check your TPU quota.
+- **Topology mismatch.** Your code's expected device count doesn't
+  match `jax.device_count()` on the slice. Symptom: shape errors deep
+  in `pmap` or sharding. *Fix:* compute mesh shapes from
+  `jax.device_count()` and `jax.process_count()` instead of hardcoding.
+- **One host hangs, the slice times out.** A single host that fails
+  collective communication takes the slice with it. JAX raises a
+  collective timeout on every host. *Fix:* the local error names the host
+  that reported it. If all hosts report the same collective timeout, read
+  the logs of each pod and find the host that is different. Common causes
+  are uneven data loading or a Python exception on one host before the
+  collective.
+- **Spot preemption.** Multi-host slices on spot capacity die together
+  if any one host is preempted. *Fix:* don't use spot for multi-host
+  unless you can absorb full restarts (and have checkpoints).
+- **Quota exhaustion mid-run.** A scheduled slice can be delayed
+  indefinitely if regional quota is full. Symptom: job stuck in
+  `PENDING` for > 10 min on a multi-host accelerator. *Fix:* check
+  Cloud Console quota for your accelerator type; consider switching
+  zones.
 
-:::{admonition} Write checkpoints often
+:::{admonition} Recommended checkpoint frequency
 :class: tip
 
 Write checkpoints at short intervals in a multi-host run, for example
@@ -272,6 +315,7 @@ import jax
 
 if jax.process_index() == 0:
   print(f"epoch {epoch}: loss={loss}")
+
 ```
 
 Kinetic does not stream the logs of the other hosts. Read them with
@@ -280,6 +324,7 @@ Kinetic does not stream the logs of the other hosts. Read them with
 ```bash
 kubectl get pods -n <namespace> -l job-id=<job-id>
 kubectl logs -n <namespace> <pod-name>
+
 ```
 
 `<namespace>` is the namespace of the active profile, `default` unless
@@ -292,13 +337,22 @@ runs, or use a detached job and read the logs before you call
 `result()`. Cloud Logging in the Cloud Console keeps the same logs after
 Kinetic deletes the pods. Filter on the pod name.
 
-If a pod fails, the failure message on the client already contains the
-last 30 log lines of each failed pod. Read those lines first. Read the
-full pod logs if those lines are not enough.
+If a job fails on any host, Kinetic catches the exception and raises it
+locally with the stack trace and the process index of that host. In addition,
+the failure message contains the last 30 log lines of each failed pod. Read
+those lines first.
+
+Usually you do not need the full logs of the other pods unless:
+
+* The local error is a collective timeout. All hosts report this error,
+so it does not tell you which host is at fault.
+* The local error indicates that Kubernetes stopped a pod before the pod
+could report a failure.
 
 `debug=True` attaches a debugger to the leader pod. Kinetic holds the
 worker pods until the leader is ready. See
-[Interactive Debugging](debugging.md#multi-host-debugging).
+[Interactive Debugging](https://www.google.com/search?q=debugging.md%23multi-host-debugging).
+
 
 ## Related pages
 
