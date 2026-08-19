@@ -69,12 +69,12 @@ is the Kinetic cluster name (from `KINETIC_CLUSTER`, defaulting to
 `kinetic-cluster`). The bucket is created by `kinetic up` and reused
 across all jobs submitted to that cluster.
 
-You can override it per job by passing `output_dir=` to the decorator,
-setting `KINETIC_OUTPUT_DIR` in your local environment before
-submission, or (when inspecting an existing job from the CLI) passing
-`--output-dir` to the relevant `kinetic jobs` subcommand. See the
-precedence table in [Configuration](../configuration.md) for how these
-resolution paths combine.
+You can override the default for one job. Pass `output_dir=` to the
+decorator, or set `KINETIC_OUTPUT_DIR` in your local environment before
+you submit the job. Kinetic reads both sources at submit time. The
+output directory therefore does not change while the job runs. The
+precedence table in [Configuration](../configuration.md) shows how these
+sources combine.
 
 ## Recommended directory layout
 

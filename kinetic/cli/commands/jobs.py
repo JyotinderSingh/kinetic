@@ -16,7 +16,9 @@ def _ensure_project(project):
   """Raise a clear CLI error if project is not set."""
   if not project:
     raise click.UsageError(
-      "Project is required. Set --project or KINETIC_PROJECT."
+      "No GCP project configured. Run 'kinetic init' to save an active "
+      "profile, or override it for this command with --project or "
+      "KINETIC_PROJECT."
     )
 
 
@@ -33,7 +35,7 @@ def jobs():
 
 @jobs.command("list")
 @jobs_options
-def list_command(project, zone, cluster_name, namespace, output_dir):
+def list_command(project, zone, cluster_name, namespace):
   """List live async jobs."""
   _ensure_project(project)
 

@@ -62,6 +62,16 @@ class TestJobsList(absltest.TestCase):
     # Should show accelerator, not call status()
     self.assertIn("l4", result.output)
 
+  def test_no_output_dir_flag(self):
+    """--output-dir was never wired to anything; it must stay removed."""
+    runner = CliRunner()
+    result = runner.invoke(
+      jobs,
+      ["list", "--project", "proj", "--output-dir", "gs://bucket/out"],
+    )
+    self.assertNotEqual(result.exit_code, 0)
+    self.assertIn("no such option", result.output.lower())
+
 
 class TestJobsStatus(absltest.TestCase):
   @mock.patch(f"{_JOBS_MODULE}._attach")
@@ -356,6 +366,14 @@ class TestMissingProject(absltest.TestCase):
     with mock.patch.dict("os.environ", {}, clear=True):
       result = runner.invoke(jobs, ["list"])
     self.assertNotEqual(result.exit_code, 0)
+
+  def test_error_points_at_kinetic_init_first(self):
+    runner = CliRunner()
+    with mock.patch.dict("os.environ", {}, clear=True):
+      result = runner.invoke(jobs, ["list"])
+    self.assertIn("kinetic init", result.output)
+    self.assertIn("--project", result.output)
+    self.assertIn("KINETIC_PROJECT", result.output)
 
 
 if __name__ == "__main__":
