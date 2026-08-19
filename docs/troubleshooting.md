@@ -257,6 +257,11 @@ caused by an OOM kill or the kernel reaping the process. Check pod
 events with `kubectl describe pod <pod-name>` (find the pod name from
 `kinetic jobs status <id>`).
 
+On a multi-host job, `kinetic jobs logs` gives you the logs of the
+leader pod only. A different host can be the host that failed. Read the
+logs of each pod, or use the process index in the local error to find
+the host that failed.
+
 ### The job does not stop after your function returns
 
 Your function left a non-daemon thread alive: a data-loader worker, a
@@ -315,6 +320,34 @@ causes remain:
 
 For a long job, write your artifacts under `KINETIC_OUTPUT_DIR` instead
 of a return value. See [Checkpointing](guides/checkpointing.md).
+
+On a multi-host job, only the leader (process 0) writes the result. You
+therefore see this message only if no host of the job wrote a record. If
+one host wrote a record, Kinetic reports the failure of that host
+instead. The next section gives the details.
+
+### A multi-host job fails, but the leader is successful
+
+Only the leader (process 0) writes the result of a multi-host job. Each
+other host writes a failure record if it fails. Kinetic reads those
+records. Kinetic then raises the exception of the failing host with the
+lowest process index.
+
+The local error gives you:
+
+- the exception and the remote traceback of that host
+- the process index of that host
+- the index of each other host that also failed
+
+Kinetic keeps the Cloud Storage artifacts under
+`gs://{bucket}/{job_id}/`, so you can examine the run.
+
+Some failures stop a host before it can write a record. Examples are an
+out-of-memory kill, a Spot preemption, and a node eviction. Kinetic then
+reports that the result claims success although the job failed, and
+gives the exit code of each pod. Run
+`kubectl describe pod <pod-name>` and look for `OOMKilled` or an
+eviction event.
 
 ### Kinetic cannot serialize the return value of your job
 

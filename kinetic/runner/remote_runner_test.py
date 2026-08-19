@@ -319,7 +319,9 @@ def _run_runner(
 
   Returns:
       ``(exit_code, result_payload_or_None)`` — the result unpickled
-      from the emulator, or None when no result was uploaded.
+      from the emulator, or None when no result was uploaded.  The
+      seeded ``_SeededArtifacts`` is left on ``test_case.artifacts`` so
+      tests can read the other blobs in the job prefix.
   """
   server = shared_server()
   tmp_path = _make_temp_path(test_case)
@@ -350,6 +352,7 @@ def _run_runner(
     context_path=str(context_zip),
     payload_path=str(payload_pkl),
   )
+  test_case.artifacts = artifacts
 
   if argv is None:
     argv = artifacts.default_argv
@@ -378,6 +381,19 @@ class _RunnerTestCase(_EmulatorTestCase):
   def run_runner(self, **kwargs):
     """Run ``main()`` against seeded emulator artifacts; see ``_run_runner``."""
     return _run_runner(self, **kwargs)
+
+  def job_blob(self, name):
+    """Unpickle a blob from the job prefix, or None when it is absent."""
+    raw = self.server.read_blob(self.artifacts.bucket, f"job/{name}")
+    return None if raw is None else cloudpickle.loads(raw)
+
+  def job_blob_names(self):
+    """The blob names present under the seeded job prefix."""
+    return sorted(
+      name
+      for name in self.server.list_blob_names(self.artifacts.bucket)
+      if name.startswith("job/")
+    )
 
 
 # Payload entry points shared by parameterized cases. They must be
@@ -893,6 +909,210 @@ class TestMainArgValidation(parameterized.TestCase):
       main()
 
     self.assertEqual(cm.exception.code, 1)
+
+
+class TestHostIndex(parameterized.TestCase):
+  """Every pod gets the same command; the env var is what separates them."""
+
+  @parameterized.named_parameters(
+    ("unset", {}, 0),
+    ("leader", {"TPU_WORKER_ID": "0"}, 0),
+    ("worker", {"TPU_WORKER_ID": "3"}, 3),
+    ("surrounding_whitespace", {"TPU_WORKER_ID": " 2 "}, 2),
+    ("empty_falls_through", {"TPU_WORKER_ID": "", "LWS_WORKER_INDEX": "5"}, 5),
+    (
+      "blank_falls_through",
+      {"TPU_WORKER_ID": "  ", "LWS_WORKER_INDEX": "1"},
+      1,
+    ),
+    ("lws_only", {"LWS_WORKER_INDEX": "7"}, 7),
+    ("tpu_wins_over_lws", {"TPU_WORKER_ID": "2", "LWS_WORKER_INDEX": "9"}, 2),
+    (
+      # The pod spec's "$(LWS_WORKER_INDEX)" only expands when the
+      # webhook-injected variable precedes it in the container env.
+      "unexpanded_substitution_falls_through",
+      {"TPU_WORKER_ID": "$(LWS_WORKER_INDEX)", "LWS_WORKER_INDEX": "4"},
+      4,
+    ),
+  )
+  def test_index_resolution(self, env, expected):
+    with mock.patch.dict(
+      os.environ,
+      {"TPU_WORKER_ID": "", "LWS_WORKER_INDEX": "", **env},
+      clear=False,
+    ):
+      # A patched-in empty string is indistinguishable from "unset" here
+      # because _host_index() skips blanks either way.
+      self.assertEqual(remote_runner._host_index(), expected)
+
+  @parameterized.named_parameters(
+    ("not_a_number", "worker-2"),
+    ("unexpanded_substitution", "$(LWS_WORKER_INDEX)"),
+    ("negative", "-1"),
+  )
+  def test_unusable_value_degrades_to_leader_with_a_warning(self, raw):
+    with (
+      mock.patch.dict(os.environ, {"TPU_WORKER_ID": raw}, clear=False),
+      mock.patch("kinetic.runner.remote_runner.logging.warning") as warn,
+    ):
+      index = remote_runner._host_index()
+
+    self.assertEqual(index, 0)
+    _assert_warned(self, warn, "TPU_WORKER_ID")
+
+
+class TestWorkerResultUri(parameterized.TestCase):
+  @parameterized.named_parameters(
+    (
+      "job_prefix",
+      "gs://bucket/job-a1b2/result.pkl",
+      3,
+      "gs://bucket/job-a1b2/result-worker-3.pkl",
+    ),
+    (
+      "nested_prefix",
+      "gs://bucket/a/b/c/result.pkl",
+      1,
+      "gs://bucket/a/b/c/result-worker-1.pkl",
+    ),
+    ("bare_name", "result.pkl", 2, "result-worker-2.pkl"),
+  )
+  def test_sibling_uri_in_the_same_prefix(self, result_gcs, index, expected):
+    self.assertEqual(
+      remote_runner._worker_result_uri(result_gcs, index), expected
+    )
+
+
+class TestMainResultOwnership(_RunnerTestCase):
+  """Only the leader writes result.pkl; workers report failures alone."""
+
+  def _host_env(self, index):
+    return mock.patch.dict(
+      os.environ, {"TPU_WORKER_ID": str(index)}, clear=False
+    )
+
+  def test_leader_writes_the_canonical_result(self):
+    exit_code, result = self.run_runner(
+      payload=_basic_payload(_add, args=(2, 3)),
+      patches=(self._host_env(0),),
+    )
+
+    self.assertEqual(exit_code, 0)
+    self.assertEqual(result["result"], 5)
+    self.assertEqual(result["host_index"], 0)
+    self.assertEqual(
+      self.job_blob_names(),
+      ["job/context.zip", "job/payload.pkl", "job/result.pkl"],
+    )
+
+  def test_worker_success_uploads_nothing(self):
+    exit_code, result = self.run_runner(
+      payload=_basic_payload(_add, args=(2, 3)),
+      patches=(self._host_env(2),),
+    )
+
+    self.assertEqual(exit_code, 0)
+    # No result.pkl (the leader owns it) and no per-host blob either:
+    # a non-leader's return value is discarded, not raced into GCS.
+    self.assertIsNone(result)
+    self.assertEqual(
+      self.job_blob_names(), ["job/context.zip", "job/payload.pkl"]
+    )
+
+  def test_worker_success_never_serializes_its_return_value(self):
+    """The discarded value is not pickled — N hosts must not pay for it."""
+    with mock.patch(
+      "kinetic.runner.remote_runner._dump_result_payload"
+    ) as dump:
+      exit_code, _ = self.run_runner(
+        payload=_basic_payload(_identity, args=(42,)),
+        patches=(self._host_env(1),),
+      )
+
+    self.assertEqual(exit_code, 0)
+    dump.assert_not_called()
+
+  def test_worker_failure_goes_to_its_own_blob(self):
+    def bad_func():
+      raise ValueError("worker 2 exploded")
+
+    exit_code, result = self.run_runner(
+      payload=_basic_payload(bad_func),
+      patches=(self._host_env(2),),
+    )
+
+    self.assertEqual(exit_code, 1)
+    self.assertIsNone(result)  # result.pkl stays untouched.
+    worker_payload = self.job_blob("result-worker-2.pkl")
+    self.assertFalse(worker_payload["success"])
+    self.assertEqual(worker_payload["host_index"], 2)
+    self.assertIsInstance(worker_payload["exception"], ValueError)
+    self.assertIn("worker 2 exploded", str(worker_payload["exception"]))
+    self.assertIn("ValueError: worker 2 exploded", worker_payload["traceback"])
+
+  def test_worker_setup_failure_goes_to_its_own_blob(self):
+    """Pre-execution failures follow the same ownership rule."""
+    exit_code, result = self.run_runner(
+      payload=_basic_payload(_noop),
+      context_bytes=b"not a zip archive",
+      patches=(self._host_env(3),),
+    )
+
+    self.assertEqual(exit_code, 1)
+    self.assertIsNone(result)
+    worker_payload = self.job_blob("result-worker-3.pkl")
+    self.assertFalse(worker_payload["success"])
+    self.assertEqual(worker_payload["host_index"], 3)
+    self.assertEqual(worker_payload["phase"], "context extract")
+
+  def test_leader_failure_still_goes_to_the_canonical_result(self):
+    def bad_func():
+      raise ValueError("leader exploded")
+
+    exit_code, result = self.run_runner(
+      payload=_basic_payload(bad_func),
+      patches=(self._host_env(0),),
+    )
+
+    self.assertEqual(exit_code, 1)
+    self.assertIsInstance(result["exception"], ValueError)
+    self.assertEqual(result["host_index"], 0)
+    self.assertNotIn("job/result-worker-0.pkl", self.job_blob_names())
+
+  def test_unusable_host_index_keeps_the_legacy_leader_behavior(self):
+    """A malformed index must not leave the job with no result at all."""
+    exit_code, result = self.run_runner(
+      payload=_basic_payload(_add, args=(2, 3)),
+      patches=(
+        mock.patch.dict(
+          os.environ, {"TPU_WORKER_ID": "not-an-index"}, clear=False
+        ),
+      ),
+    )
+
+    self.assertEqual(exit_code, 0)
+    self.assertEqual(result["result"], 5)
+
+  def test_worker_serialization_failure_is_reported_to_its_own_blob(self):
+    """A worker that cannot pickle its exception still reports one."""
+
+    class UnpicklableError(Exception):
+      def __reduce__(self):
+        raise TypeError("cannot pickle UnpicklableError")
+
+    def raise_unpicklable():
+      raise UnpicklableError("boom")
+
+    exit_code, result = self.run_runner(
+      payload=_basic_payload(raise_unpicklable),
+      patches=(self._host_env(4),),
+    )
+
+    self.assertEqual(exit_code, 1)
+    self.assertIsNone(result)
+    worker_payload = self.job_blob("result-worker-4.pkl")
+    self.assertTrue(worker_payload["serialization_failed"])
+    self.assertEqual(worker_payload["host_index"], 4)
 
 
 class TestLeaderReadySentinel(_EmulatorTestCase):

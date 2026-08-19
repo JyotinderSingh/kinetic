@@ -84,11 +84,44 @@ the actual cross-host communication. Kinetic's job is to:
   local terminal. Other hosts' stdout is not aggregated; if you need it,
   fetch it directly from the per-host pods (see "Debugging distributed
   jobs" below).
-- Return only the leader process's (`jax.process_index() == 0`) value
-  to your local machine, so you don't get N copies of the result.
+- Return only the leader process's (`jax.process_index() == 0`) value to
+  your local machine, so you do not get N copies of the result.
+- Raise the exception of the host that failed, if a host fails. The
+  next section gives the rules for the result and for the exception.
 
-When a host throws, Kinetic catches the exception and re-raises it
-locally with the failing host's traceback attached.
+## Which host reports the result
+
+All hosts run the same command. Kinetic uses the process index to decide
+which host reports the result, and which host reports an error:
+
+- **The leader writes the result.** Only process 0 writes the result
+  file for the job. You therefore always get the return value of the
+  leader. Each other host discards its own return value.
+- **Each host reports its own failure.** A host that is not the leader
+  writes a failure record. The record contains the process index of that
+  host.
+- **The failing host with the lowest index reports the error.** If the
+  leader fails, Kinetic raises the exception of the leader. If the leader
+  does not fail, Kinetic raises the exception of the failing host with
+  the lowest index. Kinetic attaches the remote traceback of that host,
+  and a note that lists each other host that also failed.
+
+A failure on one host therefore cannot make the job look successful.
+For the same failure, you always get the same local error.
+
+:::{admonition} Return values must come from process 0
+:class: tip
+
+Kinetic keeps the return value of the leader only. Put the data that you
+need on process 0 before your function returns. Use a JAX collective to
+gather sharded data, or use `jax.device_get` on a fully replicated
+array. Kinetic discards a value that only process 3 has.
+:::
+
+Some failures stop a pod before it can write a failure record. Examples
+are an out-of-memory kill, a Spot preemption, and a node eviction. The
+job still fails. In this case Kinetic has no remote traceback to show,
+and reports the exit code of each pod instead.
 
 :::{warning}
 **When not to use this:** if your model and batch fit on a single TPU
@@ -113,10 +146,11 @@ ones, with what to actually do:
   `jax.device_count()` and `jax.process_count()` instead of hardcoding.
 - **One host hangs, the slice times out.** A single host that fails
   collective communication takes the slice with it. JAX raises a
-  collective timeout on every host. *Fix:* read logs from every host —
-  Kinetic interleaves them — and look for the divergent one. Common
-  causes are uneven data loading or a Python exception on one host
-  before the collective.
+  collective timeout on every host. *Fix:* the local error names the host
+  that reported it. If all hosts report the same collective timeout, read
+  the logs of each pod and find the host that is different. Common causes
+  are uneven data loading or a Python exception on one host before the
+  collective.
 - **Spot preemption.** Multi-host slices on spot capacity die together
   if any one host is preempted. *Fix:* don't use spot for multi-host
   unless you can absorb full restarts (and have checkpoints).
@@ -156,9 +190,16 @@ the slice; `kubectl logs <pod-name>` then returns that host's stdout.
 Cloud Logging in the GCP Console offers the same view through a UI
 filter on the job name.
 
-If a job fails on any host, Kinetic catches the exception and re-raises
-it locally with that host's stack trace, so you usually do not need to
-inspect non-leader logs to diagnose a crash.
+If a job fails on any host, Kinetic catches the exception and raises it
+locally. The local error gives the stack trace and the process index of
+that host. Usually you do not need the logs of the other pods.
+
+Read the pod logs in two cases:
+
+- The local error is a collective timeout. All hosts report this error,
+  so it does not tell you which host is at fault.
+- The local error tells you that Kubernetes stopped a pod before the pod
+  could report a failure.
 
 ## Related pages
 
