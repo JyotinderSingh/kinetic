@@ -1,37 +1,21 @@
-"""
-Example: Using kinetic with GKE
-
-This demonstrates running remote functions on a GKE cluster with kinetic.
+"""Run remote functions on a CPU pool, a TPU pool, and a GPU pool in turn.
 
 Prerequisites:
-1. A GKE cluster (CPU or with GPU node pools)
-2. kubectl configured to access the cluster
-3. KINETIC_PROJECT environment variable set
+1. A Kinetic cluster and an active profile. Run `kinetic init` one time.
+   The profile supplies the project, the zone, and the cluster.
+2. A node pool for each accelerator that this script uses. Add a pool
+   with `kinetic pool add`, for example:
 
-Setup (CPU cluster - works out of the box):
-    ./setup.sh  # Answer 'yes' when prompted for GKE setup
+       kinetic pool add --accelerator tpu-v6e-2x4 --spot
+       kinetic pool add --accelerator gpu-t4
 
-Setup (GPU cluster - for GPU examples):
-    # Add a GPU node pool to existing cluster
-    gcloud container node-pools create gpu-pool \\
-        --cluster kinetic-cluster \\
-        --zone us-central1-a \\
-        --machine-type n1-standard-4 \\
-        --accelerator type=nvidia-tesla-t4,count=1 \\
-        --num-nodes 1 \\
-        --scopes gke-default,storage-full
+   `kinetic pool list` shows the pools of the cluster. Change the
+   `accelerator=` values below to match your pools, or remove the calls
+   for the pools that you do not have. `kinetic accelerators` lists every
+   accelerator name.
 
-    # Install NVIDIA GPU drivers
-    kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/container-engine-accelerators/master/nvidia-driver-installer/cos/daemonset-preloaded.yaml
-
-Supported accelerators:
-    - cpu: CPU only (no GPU required)
-    - gpu-t4: NVIDIA T4
-    - gpu-l4: NVIDIA L4
-    - gpu-v100: NVIDIA V100
-    - gpu-a100: NVIDIA A100 (40GB)
-    - gpu-a100-80gb: NVIDIA A100 (80GB)
-    - gpu-h100: NVIDIA H100
+Note: `tpu-v6e-2x4` is a two-host slice, so Kinetic runs it on the
+Pathways backend. The `spot=True` job needs a Spot node pool.
 """
 
 import os

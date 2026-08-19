@@ -7,6 +7,7 @@ examples/fashion_mnist
 examples/simple_demo
 examples/example_async_jobs
 examples/example_data_api
+examples/example_fuse
 examples/example_checkpoint
 examples/example_keras_checkpoint
 examples/example_collections
@@ -17,26 +18,39 @@ examples/gemma3_sft_demo
 examples/tunix_sft
 ```
 
-A catalog of runnable example scripts using Kinetic. Every example below is rendered directly on this site and is also available as a raw Python script in the GitHub repository.
+This page is a catalog of the runnable example scripts in the
+repository. Each example renders on this site and is also a Python file
+in the `examples/` directory of the
+[GitHub repository](https://github.com/keras-team/kinetic/tree/main/examples).
 
-Examples are grouped into three tiers:
+The examples come in three tiers:
 
-- {bdg-success}`Quickstart` — your first run. Minimal setup, sensible defaults.
-- {bdg-secondary}`Core` — the everyday product surface: async jobs, data,
-  checkpoints, parallel sweeps.
-- {bdg-secondary}`Advanced` — multi-host Pathways jobs, LLM fine-tuning,
-  anything that needs special quota or external credentials.
+- {bdg-success}`Quickstart` — the first run, with the defaults.
+- {bdg-secondary}`Core` — the everyday features: detached jobs, data,
+  checkpoints, and parallel sweeps.
+- {bdg-secondary}`Advanced` — multi-host Pathways jobs and LLM
+  fine-tuning. These need special quota or external credentials.
 
-To run any example: clone the repo, install Kinetic, set `KINETIC_PROJECT`,
-and `python examples/<file>.py`.
+To run an example, clone the repository, install Kinetic, make sure that
+`kinetic init` has saved an active profile, and run the script:
 
 ```bash
 git clone https://github.com/keras-team/kinetic.git
 cd kinetic
 uv pip install -e .
-export KINETIC_PROJECT="your-project-id"
+kinetic init          # skip this step if you already have an active profile
 python examples/fashion_mnist.py
 ```
+
+Each example names its accelerator in the decorator. Your cluster needs a
+node pool with that accelerator, or you change the `accelerator=` value.
+See [Getting Started](getting_started.md).
+
+The LLM examples import packages that the default image does not have,
+such as `keras-hub`, `tunix`, and `wandb`. Before you run one of them,
+put a `requirements.txt` with those packages next to the script, or in
+the `examples/` directory. Kinetic reads that file and builds an image
+with the packages. See [Dependencies](guides/dependencies.md).
 
 ## Quickstart
 
@@ -50,9 +64,9 @@ python examples/fashion_mnist.py
 :class-body: sd-fs-6
 :class-title: sd-fs-5
 
-The first thing to run after `kinetic up`. A small Keras classifier on
-Fashion-MNIST that confirms your cluster can schedule a TPU pod and
-stream a real result back to your shell.
+The first script to run after `kinetic init`. A small Keras classifier
+on Fashion-MNIST that shows that your cluster can schedule a TPU pod and
+return a result to your shell.
 
 +++
 
@@ -60,15 +74,15 @@ stream a real result back to your shell.
 {bdg-secondary}`TPU`
 :::
 
-:::{grid-item-card} Keras + JAX smoke test
+:::{grid-item-card} Keras + JAX on a CPU node
 :link: examples/simple_demo.md
 :class-card: sd-shadow-sm
 :class-body: sd-fs-6
 :class-title: sd-fs-5
 
-The cheapest sanity check there is. Keras-on-JAX on a CPU node — no
-accelerator quota needed, useful for verifying your install before you
-ask for hardware.
+The smallest possible check. Keras on JAX on a CPU node, without
+accelerator quota. Use it to test your install before you request
+hardware.
 
 +++
 
@@ -90,9 +104,9 @@ ask for hardware.
 :class-body: sd-fs-6
 :class-title: sd-fs-5
 
-Walks through every part of the detached-job API end-to-end: `run_async()`,
-`status()`/`tail()`/`result()`, reattach from another shell with
-`kinetic.attach()`, and enumerate jobs with `list_jobs()`.
+The full detached-job API: `run_async()`, `status()`, `tail()`,
+`result()`, a reattach from another shell with `kinetic.attach()`, and
+`list_jobs()`.
 
 +++
 
@@ -106,14 +120,29 @@ Walks through every part of the detached-job API end-to-end: `run_async()`,
 :class-body: sd-fs-6
 :class-title: sd-fs-5
 
-Wrap a local directory in `kinetic.Data(...)` and let it land as a
-plain filesystem path on the remote — your training code doesn't have
-to know whether the bytes started on your laptop or in GCS.
+Wrap a local directory in `kinetic.Data(...)`. The function receives a
+plain filesystem path, and does not know whether the bytes started on
+your laptop or in Cloud Storage.
 
 +++
 
 {bdg-secondary}`Data` &nbsp;
 {bdg-secondary}`GCS`
+:::
+
+:::{grid-item-card} Mount data with FUSE
+:link: examples/example_fuse.md
+:class-card: sd-shadow-sm
+:class-body: sd-fs-6
+:class-title: sd-fs-5
+
+`Data(..., fuse=True)` for volumes, single files, several mounts in one
+job, and a mix of mounted and downloaded data.
+
++++
+
+{bdg-secondary}`Data` &nbsp;
+{bdg-secondary}`FUSE`
 :::
 
 :::{grid-item-card} Resumable JAX training with Orbax
@@ -122,9 +151,9 @@ to know whether the bytes started on your laptop or in GCS.
 :class-body: sd-fs-6
 :class-title: sd-fs-5
 
-JAX training that picks up where it left off. Writes Orbax checkpoints
-to `KINETIC_OUTPUT_DIR` and proves the resume path by relaunching the
-same function and seeing it skip already-completed steps.
+JAX training that continues where it stopped. Writes Orbax checkpoints
+to `KINETIC_OUTPUT_DIR`, and shows the resume path when you run the same
+function again.
 
 +++
 
@@ -139,9 +168,8 @@ same function and seeing it skip already-completed steps.
 :class-body: sd-fs-6
 :class-title: sd-fs-5
 
-Auto-resumable Keras training. Round-trips `model.get_weights()` through
-Orbax so a restarted job picks up at the right step without any custom
-save/load code.
+The same pattern for Keras. Round-trips `model.get_weights()` through
+Orbax, so a restarted job continues at the right step.
 
 +++
 
@@ -156,9 +184,8 @@ save/load code.
 :class-body: sd-fs-6
 :class-title: sd-fs-5
 
-Fan out a grid of jobs with `run_async_map()`, batch submissions to keep
-the cluster happy, and gather results — including how to handle the
-job that inevitably fails halfway through.
+Fan out a grid of jobs with `run_async_map()`, limit the concurrency,
+collect the results, and handle the job that fails.
 
 +++
 
@@ -166,15 +193,14 @@ job that inevitably fails halfway through.
 {bdg-secondary}`Parallel`
 :::
 
-:::{grid-item-card} Mix accelerators in one driver
+:::{grid-item-card} Mix accelerators in one script
 :link: examples/example_gke.md
 :class-card: sd-shadow-sm
 :class-body: sd-fs-6
 :class-title: sd-fs-5
 
-One driver script that successively schedules work on CPU, TPU, and
-GPU pools — handy for verifying which hardware your cluster will
-actually serve.
+One script that runs work on a CPU pool, a TPU pool, and a GPU pool in
+turn. Useful to check which hardware your cluster serves.
 
 +++
 
@@ -195,8 +221,8 @@ actually serve.
 :class-body: sd-fs-6
 :class-title: sd-fs-5
 
-The reference for scaling beyond a single TPU host. A short JAX program
-that verifies cross-host collectives are actually wired up before you
+The reference for a slice with more than one TPU host. A short JAX
+program that checks that the cross-host collectives work before you
 trust them with a real workload.
 
 +++
@@ -212,9 +238,10 @@ trust them with a real workload.
 :class-body: sd-fs-6
 :class-title: sd-fs-5
 
-End-to-end SFT of Gemma 2B with LoRA across multiple TPU hosts. The
-realistic LLM workload to model your own fine-tuning runs after — pulls
-weights from Kaggle and runs on Pathways.
+Supervised fine-tuning of Gemma 2B with LoRA and the Keras
+`DataParallel` distribution. Pulls the weights from Kaggle, and forces
+the `pathways` backend on a single-host slice to exercise the multi-host
+code path.
 
 +++
 
@@ -229,9 +256,9 @@ weights from Kaggle and runs on Pathways.
 :class-body: sd-fs-6
 :class-title: sd-fs-5
 
-Compact Gemma 3 1B SFT on a single TPU. A good baseline for getting an
-LLM workload running before scaling out to Pathways, and a worked
-example of forwarding Kaggle credentials into the remote pod.
+Compact Gemma 3 1B fine-tuning on one TPU. A good baseline before you
+scale to Pathways, and a worked example of Kaggle credentials in the
+pod.
 
 +++
 
@@ -239,15 +266,14 @@ example of forwarding Kaggle credentials into the remote pod.
 {bdg-secondary}`TPU`
 :::
 
-:::{grid-item-card} Tunix SFT Example
+:::{grid-item-card} Tunix SFT
 :link: examples/tunix_sft.md
 :class-card: sd-shadow-sm
 :class-body: sd-fs-6
 :class-title: sd-fs-5
 
-SFT of Gemma 3 with LoRA/QLoRA on TPU v5litepod. Demonstrates how to
-run the Tunix SFT script on a remote cluster with environment variable
-capture for credentials.
+Supervised fine-tuning of Gemma 3 with LoRA and QLoRA through Tunix on
+a TPU v5e slice, with credentials forwarded through `capture_env_vars`.
 
 +++
 
@@ -257,9 +283,20 @@ capture for credentials.
 :::
 ::::
 
-## Related pages
+## Tutorials
 
-- [Getting Started](getting_started.md): your first run, end-to-end.
-- [Keras Training](examples/keras_training.md): patterns for Keras users.
-- [LLM Fine-tuning](examples/llm_finetuning.md): extended walkthrough using the
-  Gemma examples.
+The pages in the **Examples & Tutorials** section of the sidebar are
+longer walkthroughs:
+
+- [Training Keras Models](examples/keras_training.md) — patterns for an
+  existing Keras script.
+- [Native JAX Training](examples/jax_training.md) — JAX loops,
+  single-host parallelism, and multi-host slices.
+- [PyTorch Training](examples/pytorch_training.md) — PyTorch on GPU
+  nodes.
+- [Fine-tuning Gemma 4 on TPU](examples/gemma4_finetuning.md) — a
+  complete LoRA fine-tune with inference.
+- [Fine-tuning LLMs](examples/llm_finetuning.md) — Keras Hub, Kaggle
+  credentials, and LoRA.
+- [Running vLLM on TPU](guides/vllm_tpu.md) — vLLM inference on a TPU
+  slice.

@@ -5,12 +5,13 @@ The model is gemma4_instruct_26b_a4b — a Mixture of Experts architecture with
 memory (~52 GB in bfloat16), so a v5litepod-8 (8 chips × 16 GB = 128 GB HBM)
 is the minimum supported configuration.
 
-Set the placeholder values in __main__ before running.
-See docs/guides/gemma4_finetuning.md for a full walkthrough.
+Run `kinetic init` one time so that an active profile supplies the project,
+the zone, and the cluster. Make sure that the cluster has a v5litepod-8
+node pool (`kinetic pool add --accelerator tpu-v5litepod-8`). See
+docs/examples/gemma4_finetuning.md for the full walkthrough.
 
-Dependencies are declared in requirements.txt in this directory. Run this
-script from examples/gemma4_finetuning/ so Kinetic picks it up from the
-current working directory.
+Kinetic reads the requirements.txt in this directory: it starts the search
+at the directory of this file, not at your current working directory.
 """
 
 import os
@@ -326,9 +327,9 @@ def run_inference(weights_path: str):
 
 if __name__ == "__main__":
   os.environ["KERAS_BACKEND"] = "jax"
-  os.environ["GOOGLE_CLOUD_PROJECT"] = "your-project-id"
-  os.environ["KINETIC_ZONE"] = "us-central1-a"
-  os.environ["GOOGLE_CLOUD_ZONE"] = "us-central1-a"
+  # The active profile (from `kinetic init`) supplies the project, the zone,
+  # and the cluster. Set KINETIC_PROJECT / KINETIC_ZONE here only for a
+  # one-off override.
 
   weights_path = fine_tune_gemma4()
   print(f"Training complete. Weights at: {weights_path}")

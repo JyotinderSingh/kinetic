@@ -5,28 +5,42 @@
 :hidden:
 
 getting_started
-guides/execution_modes
+concepts
 troubleshooting
 guides/faq
 ```
 
 ```{toctree}
-:caption: Core Workflows
+:caption: Run Jobs
 :hidden:
 
 guides/data
 guides/checkpointing
-guides/packaging
 guides/dependencies
 guides/env_vars
-guides/profiles
+guides/async_jobs
+guides/batched_jobs
 guides/debugging
-guides/profiling
-guides/cost_optimization
 guides/distributed_training
-guides/vllm_tpu
+guides/profiling
+```
+
+```{toctree}
+:caption: Manage Infrastructure
+:hidden:
+
+guides/profiles
+guides/clusters
+guides/cost_optimization
+guides/reservations
+```
+
+```{toctree}
+:caption: Advanced
+:hidden:
+
 guides/containers
-guides/advanced
+guides/packaging
 ```
 
 ```{toctree}
@@ -38,6 +52,7 @@ examples/jax_training
 examples/pytorch_training
 examples/gemma4_finetuning
 examples/llm_finetuning
+guides/vllm_tpu
 examples
 ```
 
@@ -47,8 +62,8 @@ examples
 
 api
 cli
-accelerators
 configuration
+accelerators
 security
 ```
 
@@ -62,9 +77,9 @@ code-of-conduct
 ```
 
 :::{container} kinetic-hero
-Run any Python function on a cloud TPU or GPU with one decorator. No
-infrastructure to wire up, no images to build by hand, no multi-host
-boilerplate.
+Run any Python function on a cloud TPU or GPU with one decorator. Kinetic
+creates the infrastructure, builds the container image, ships your code,
+and returns the result.
 :::
 
 ::::{container} kinetic-hero-buttons
@@ -74,10 +89,10 @@ boilerplate.
 Get started
 :::
 
-:::{button-ref} examples
+:::{button-ref} concepts
 :color: secondary
 
-Browse examples
+How it works
 :::
 ::::
 
@@ -85,7 +100,7 @@ Browse examples
 import kinetic
 
 
-@kinetic.run(accelerator="tpu-v6e-8")
+@kinetic.run(accelerator="tpu-v5litepod-4")
 def train_model():
   import keras
 
@@ -94,155 +109,114 @@ def train_model():
   return model.history.history["loss"][-1]
 
 
-final_loss = train_model()  # runs on a TPU v6e-8 slice
+final_loss = train_model()  # runs on a 4-chip TPU v5e slice
 ```
 
 ## Start here
 
-Three entry points cover what most new users need first.
+Read these three pages in order. They take about 30 minutes. When
+something does not work, see [Troubleshooting](troubleshooting.md), and
+for short answers see the [FAQ](guides/faq.md).
 
 ::::{grid} 1 1 3 3
 :gutter: 3
 
-:::{grid-item-card} {octicon}`rocket;1em` Your first run
+:::{grid-item-card} {octicon}`rocket;1em` 1. Getting Started
 :link: getting_started
 :link-type: doc
 
-Install, point at a cluster, and run a real Keras job in minutes.
+Install Kinetic, run `kinetic init`, and run a Keras job on a TPU.
 :::
 
-:::{grid-item-card} {octicon}`clock;1em` Long-running jobs
-:link: guides/async_jobs
+:::{grid-item-card} {octicon}`light-bulb;1em` 2. How Kinetic Works
+:link: concepts
 :link-type: doc
 
-Switch from blocking `run()` to detached `run_async()` for jobs that
-take hours.
+The vocabulary, the job lifecycle, and where your code, data, and
+results go.
 :::
 
-:::{grid-item-card} {octicon}`database;1em` Data and checkpoints
-:link: guides/data
-:link-type: doc
-
-Ship local files in, write durable artifacts back out via
-`KINETIC_OUTPUT_DIR`.
-:::
-::::
-
-## How Kinetic works
-
-Five short phases on every job.
-
-:::{container} kinetic-steps
-1. **Discover.**
-   Kinetic captures your function, its package root, and the
-   `Data(...)` arguments. Kinetic reads `requirements.txt` or
-   `pyproject.toml`. See
-   [What Ships to the Pod](guides/packaging.md).
-
-2. **Build or fetch.**
-   A container image is produced — built with your dependencies
-   (bundled mode) or pulled from a published base (prebuilt mode). See
-   [Execution Modes](guides/execution_modes.md).
-
-3. **Schedule.**
-   A Kubernetes resource (a `Job` for single-host workloads, a
-   `LeaderWorkerSet` for multi-host TPU jobs on the Pathways backend)
-   is submitted to your GKE cluster. The autoscaler provisions
-   accelerator nodes if needed.
-
-4. **Run.**
-   Your function executes inside the pod with `KINETIC_OUTPUT_DIR`
-   set; logs stream back to your terminal.
-
-5. **Collect.**
-   The return value is serialized to GCS and pulled back to your local
-   process. `@kinetic.run()` cleans up the pod and GCS artifacts as
-   soon as the result is collected. `run_async()` leaves the pod
-   running until you call `.result()` or `.cleanup()` on the returned
-   `JobHandle` — important to remember on expensive accelerators.
-:::
-
-## Choose your execution mode
-
-Three modes control how dependencies get into the container. See
-[Execution Modes](guides/execution_modes.md) for the full
-recommendation matrix and per-mode startup expectations.
-
-::::{grid} 1 1 3 3
-:gutter: 3
-
-:::{grid-item-card} Bundled
-:link: guides/execution_modes
-:link-type: doc
-
-Kinetic builds a custom image with your deps baked in. Best for stable
-workflows and reproducible runs.
-
-+++
-{bdg-success}`default`
-:::
-
-:::{grid-item-card} Prebuilt
-:link: guides/execution_modes
-:link-type: doc
-
-Pulls a published base image, installs your deps at pod startup. Best
-for fast iteration when deps change often.
-:::
-
-:::{grid-item-card} Custom image
-:link: guides/execution_modes
-:link-type: doc
-
-Bring your own image URI. Best when you need custom system libraries
-or a corporate-vetted base.
-:::
-::::
-
-## Explore the docs
-
-::::{grid} 1 1 3 3
-:gutter: 3
-
-:::{grid-item-card} {octicon}`file-directory;1em` Working with data
-:link: guides/data
-:link-type: doc
-
-Get inputs into the job and durable outputs back out.
-:::
-
-:::{grid-item-card} {octicon}`history;1em` Checkpointing
-:link: guides/checkpointing
-:link-type: doc
-
-Make long jobs resumable with `KINETIC_OUTPUT_DIR`.
-:::
-
-:::{grid-item-card} {octicon}`server;1em` Distributed training
-:link: guides/distributed_training
-:link-type: doc
-
-Scale beyond one host with the Pathways backend.
-:::
-
-:::{grid-item-card} {octicon}`graph;1em` Cost optimization
-:link: guides/cost_optimization
-:link-type: doc
-
-Spot capacity, autoscaling, and cleanup habits that save money.
-:::
-
-:::{grid-item-card} {octicon}`bug;1em` Debugging
-:link: guides/debugging
-:link-type: doc
-
-Interactive debugging and log streaming for remote jobs.
-:::
-
-:::{grid-item-card} {octicon}`code-square;1em` Examples
+:::{grid-item-card} {octicon}`code-square;1em` 3. Examples
 :link: examples
 :link-type: doc
 
-Runnable scripts from first run to multi-host LLM fine-tuning.
+Runnable scripts, from a first run to multi-host LLM fine-tuning.
+:::
+::::
+
+## What happens on every job
+
+:::{container} kinetic-steps
+1. **Package.**
+   Kinetic serializes your function and archives your project source.
+   `Data(...)` arguments upload one time, keyed by content.
+
+2. **Build.**
+   Kinetic builds a container image with the packages from your
+   `requirements.txt` or `pyproject.toml`, and caches the image. Later
+   runs with the same dependencies skip this step.
+
+3. **Schedule.**
+   Kinetic creates a Kubernetes Job on your GKE cluster, or a
+   LeaderWorkerSet for a multi-host TPU slice. The autoscaler starts an
+   accelerator node in the matching node pool.
+
+4. **Run.**
+   The pod runs your function with `KINETIC_OUTPUT_DIR` set. The logs
+   stream to your terminal.
+
+5. **Collect.**
+   The pod uploads the return value to Cloud Storage. Kinetic downloads
+   the value and deletes the job resources. Files that you wrote under
+   `KINETIC_OUTPUT_DIR` stay.
+:::
+
+## Explore the guides
+
+::::{grid} 1 1 3 3
+:gutter: 3
+
+:::{grid-item-card} {octicon}`file-directory;1em` Working with Data
+:link: guides/data
+:link-type: doc
+
+Get inputs into the job with `kinetic.Data(...)`.
+:::
+
+:::{grid-item-card} {octicon}`history;1em` Outputs and Checkpoints
+:link: guides/checkpointing
+:link-type: doc
+
+Keep files and make long jobs resumable with `KINETIC_OUTPUT_DIR`.
+:::
+
+:::{grid-item-card} {octicon}`clock;1em` Detached Jobs
+:link: guides/async_jobs
+:link-type: doc
+
+`run_async()` for jobs that run more than a few minutes. Reattach from
+any machine.
+:::
+
+:::{grid-item-card} {octicon}`stack;1em` Profiles
+:link: guides/profiles
+:link-type: doc
+
+One saved project, zone, cluster, and namespace per cluster. Switch
+with one command.
+:::
+
+:::{grid-item-card} {octicon}`server;1em` Clusters and Node Pools
+:link: guides/clusters
+:link-type: doc
+
+Add accelerator pools, share a cluster with a team, and clean up.
+:::
+
+:::{grid-item-card} {octicon}`cpu;1em` Distributed Training
+:link: guides/distributed_training
+:link-type: doc
+
+Scale to a multi-host TPU slice with the Pathways backend.
 :::
 ::::

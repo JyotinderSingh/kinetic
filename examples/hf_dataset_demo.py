@@ -3,8 +3,10 @@
 This script demonstrates how to use Hugging Face datasets in a Kinetic job.
 It downloads the dataset on the remote pod and makes it available to your function.
 
-Note: To run this demo with a gated or private dataset, you must set the
-`HF_TOKEN` environment variable in your environment before running this script.
+Note: For a gated or private dataset, set `HF_TOKEN` in your shell and add
+`capture_env_vars=["HF_TOKEN"]` to the decorator. Kinetic then copies the
+token into the pod, where the `datasets` library reads it. Kinetic itself
+does not read `HF_TOKEN`.
 """
 
 import time

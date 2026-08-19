@@ -1,172 +1,226 @@
 # Container Images
 
-This page is the deep reference for the container image system: the
-three modes side by side, the prebuilt-base workflow, the custom-image
-contract, and the `kinetic build-image` command.
+Every job runs inside a container image. By default, Kinetic builds that
+image for you and caches it. Most people never change this default. This
+page is for three cases where the default does not fit. The build step
+is too slow for your workflow. You need system libraries that a Python
+install cannot provide. Or your organization requires a vetted base
+image.
 
-For a higher-level overview and the recommendation matrix on which
-mode to pick, start with [Execution Modes](../guides/execution_modes.md).
+## The three modes
 
-Kinetic supports three container image modes that control how your remote execution environment is built and deployed. Choose the mode that best fits your workflow by setting the `container_image` parameter in the `@kinetic.run()` decorator.
+The `container_image` argument of `@kinetic.run()` selects how Kinetic
+produces the image:
 
-:::{note}
-**Expected timing:**
+| Mode | `container_image=` | Build step | Where your dependencies install |
+| ---- | ------------------ | ---------- | ------------------------------- |
+| **Bundled** (default) | `None` or `"bundled"` | Cloud Build, cached by a hash of the inputs | In the image, at build time |
+| **Prebuilt** | `"prebuilt"` | None. Kinetic pulls a base image that you published. | In the pod, at start, with `uv pip install` |
+| **Custom** | An image URI | None. You build and push the image. | In your image. Kinetic installs nothing. |
 
-- **Bundled, cold (first run / dep change):** ~2–5 minutes for the
-  Cloud Build step.
-- **Bundled, warm (cached image):** under a minute to schedule and
-  start the pod.
-- **Prebuilt:** 30–60 seconds for the base image pull (cached after
-  first use on a node), plus the time to `uv pip install` your
-  `requirements.txt`.
-- **Custom:** a single image pull, then immediate execution. Cold
-  pulls vary widely with image size and registry latency.
-:::
+```python
+@kinetic.run(accelerator="tpu-v5litepod-4")  # bundled (the default)
+def train_bundled(): ...
+
+
+@kinetic.run(accelerator="tpu-v5litepod-4", container_image="prebuilt")
+def train_prebuilt(): ...
+
+
+@kinetic.run(
+  accelerator="tpu-v5litepod-4",
+  container_image="us-docker.pkg.dev/me/repo/img:v1",  # custom
+)
+def train_custom(): ...
+```
+
+In all three modes, Kinetic ships your function and your project source
+with the job. The image supplies the installed packages only. See
+[What Ships to the Pod](packaging.md).
+
+## Which mode to use
+
+| Situation | Mode | Reason |
+| --------- | ---- | ------ |
+| You start with Kinetic | Bundled | Works without setup. |
+| Your dependencies change less than once a day | Bundled | The cached image removes the build from later runs. |
+| Your dependency set is large | Bundled | You pay the install time one time, at build time. |
+| You need a reproducible environment | Bundled | The exact environment is frozen in a tagged image. |
+| You change the dependency file many times a day | Prebuilt | No build. The install runs at pod start. Needs a published base image. |
+| You need system libraries (custom CUDA builds, C++ libraries) | Custom, or prebuilt with your own Dockerfile | Bundled installs Python packages only. `kinetic build-image --dockerfile` lets a prebuilt base image contain system libraries. |
+| You need private packages that require credentials at install time | Custom | You control the build environment. |
+| Your organization requires a vetted base image | Custom | Use the image that your platform team approves. |
+
+## Bundled mode (default)
+
+Kinetic runs Cloud Build to produce an image and pushes the image to the
+Artifact Registry repository of the cluster. The image contains:
+
+- A `python:{X.Y}-slim` base image, where `X.Y` is the Python minor
+  version of your local interpreter. Pickled code is not portable across
+  minor versions, so this rule keeps the pod compatible with your client.
+- JAX with the runtime for the accelerator category: `jax[tpu]` with
+  `libtpu`, `jax[cuda12]`, or plain `jax` for CPU.
+- `keras`, `cloudpickle`, `google-cloud-storage`, and `keras-kinetic`
+  pinned to your client version.
+- The packages from your dependency file, without the JAX entries. See
+  [Dependencies](dependencies.md).
+- The Kinetic runner script.
+
+Kinetic tags the image with a hash of the base image, the accelerator
+category, the Kinetic version, the filtered dependency file, the runner
+script, and the Dockerfile template. Two jobs with the same inputs share
+one image.
+
+**Timing:**
+
+- **Cold** (first run, or after a change to the dependency file): about
+  5 to 10 minutes for the build.
+- **Warm** (cached image): no build. The pod starts in less than 1
+  minute while a node still runs, or after the 2 to 5 minutes that a new
+  node needs.
+
+To inspect a build, list the Cloud Build history of the project:
+
+```bash
+gcloud builds list --limit=5
+gcloud builds log <build-id>
+```
+
+## Prebuilt mode
+
+In prebuilt mode, Kinetic does not build. Kinetic pulls a **base image**
+that already contains the accelerator runtime and the core packages, and
+the pod installs your dependency file at start with `uv pip install`.
 
 :::{warning}
-**When not to use custom image mode:** if you only need different
-Python packages, bundled or prebuilt are simpler and cheaper. Reach
-for custom images when you have non-Python system libraries (CUDA
-builds, C++ deps), corporate compliance requirements, or you genuinely
-want to manage the image lifecycle yourself.
+**Kinetic does not publish base images.** The default repository name is
+`kinetic` on Docker Hub, but no images exist there. Before you use
+prebuilt mode, publish base images to your own repository with
+`kinetic build-image`, and point Kinetic at that repository.
 :::
 
-| Mode                  | `container_image=`    | Build step                       | Dependencies installed              |
-| --------------------- | --------------------- | -------------------------------- | ----------------------------------- |
-| **Bundled** (default) | `None` or `"bundled"` | Cloud Build (cached by dep hash) | Baked into the image                |
-| **Prebuilt**          | `"prebuilt"`          | None                             | At pod startup via `uv pip install` |
-| **Custom**            | `"<image-uri>"`       | None (you manage it)             | Whatever is in your image           |
+### Set up prebuilt mode
 
-## Bundled Mode (Default)
+1. Build and push the base images. One image per accelerator category:
 
-Bundled mode builds a custom container image via Cloud Build with all your dependencies baked in. The image is tagged by a hash of your dependencies, so unchanged dependencies reuse the cached image.
+   ```bash
+   kinetic build-image --repo us-docker.pkg.dev/my-project/kinetic-base
+   ```
 
-```python
-import kinetic
+2. Tell Kinetic where the images are. Set the environment variable, or
+   pass the repository in the decorator:
 
+   ::::{tab-set}
 
-# Bundled mode — these are equivalent:
-@kinetic.run(accelerator="tpu-v6e-8")
-def train(): ...
+   :::{tab-item} Environment variable
 
+   ```bash
+   export KINETIC_BASE_IMAGE_REPO=us-docker.pkg.dev/my-project/kinetic-base
+   ```
+   :::
 
-@kinetic.run(accelerator="tpu-v6e-8", container_image="bundled")
-def train(): ...
-```
+   :::{tab-item} Decorator argument
 
-### Tradeoffs
+   ```python
+   @kinetic.run(
+     accelerator="gpu-l4",
+     container_image="prebuilt",
+     base_image_repo="us-docker.pkg.dev/my-project/kinetic-base",
+   )
+   def train(): ...
+   ```
+   :::
 
-- **Reproducible**: The exact environment is frozen in the image.
-- **First-run cost**: The initial build takes ~2-5 minutes. Subsequent runs with unchanged dependencies use the cached image and start within a few seconds.
-- **Good for**: Production workloads, large dependency sets where you want to avoid per-run install overhead, or when you need a fully reproducible environment.
+   ::::
 
-## Prebuilt Mode
+3. Select the mode with `container_image="prebuilt"`.
 
-Prebuilt mode uses a pre-published base image that already contains the accelerator runtime (JAX, CUDA/TPU libraries) and core dependencies. Your project's `requirements.txt` or `pyproject.toml` dependencies are installed at pod startup via `uv pip install`, so there is no Cloud Build step.
+### How a prebuilt job starts
 
-```python
-@kinetic.run(accelerator="tpu-v6e-8", container_image="prebuilt")
-def train(): ...
-```
+1. Kinetic resolves the image name
+   `{repo}/base-{cpu|gpu|tpu}:{kinetic version}`. The version is the
+   version of your installed `keras-kinetic` package. If you upgrade the
+   client, run `kinetic build-image` again to publish images with the new
+   tag.
+2. Kinetic filters the JAX entries out of your dependency file and
+   uploads the result next to the job artifacts. Kinetic refuses a line
+   that points to a local path (`-r other.txt`, `-e .`, `./wheel.whl`),
+   because that path does not exist on the pod.
+3. The pod pulls the base image, runs `uv pip install` on the uploaded
+   file, and then runs your function.
 
-### How it works
+**Timing:** the image pull takes 30 to 60 seconds the first time on a
+node, and almost no time once the node has the image. The install time
+depends on your dependency file. A small file installs in less than 1
+minute.
 
-1. Kinetic resolves the base image from the image repository (see [Custom prebuilt images](#custom-prebuilt-images) below) using the accelerator category (`cpu`, `gpu`, or `tpu`) and the kinetic package version.
-2. Your project dependencies are filtered (JAX packages are removed to avoid conflicts) and uploaded to GCS alongside your code.
-3. At pod startup, the runner installs your dependencies with `uv pip install` before executing your function.
+The base image must have the same Python minor version as the client
+that submits the job. `kinetic build-image` uses the Python version of
+the machine that runs it.
 
-### Tradeoffs
+## Custom image mode
 
-- **Fast iteration**: No build step means jobs start quickly.
-- **Startup cost**: `uv pip install` runs on every job. For large dependency sets this adds time to each run.
-- **Good for**: Most workflows, especially during development and experimentation.
-
-### Custom prebuilt images
-
-By default, Kinetic pulls official base images from Docker Hub (`kinetic/base-{category}:{version}`). To use your own prebuilt images — for example, with additional system libraries or private packages — build and push them with the `kinetic build-image` command, then point Kinetic at your repository.
-
-Build and push images:
-
-```bash
-kinetic build-image --repo us-docker.pkg.dev/my-project/kinetic-base
-```
-
-Then set the repository so Kinetic uses your images:
-
-::::{tab-set}
-
-:::{tab-item} Environment variable
-
-```bash
-export KINETIC_BASE_IMAGE_REPO=us-docker.pkg.dev/my-project/kinetic-base
-```
-:::
-
-:::{tab-item} Decorator argument
+Pass an image URI, and Kinetic uses the image without changes. Kinetic does not
+build and does not install. Your image is responsible for every package
+that your function imports.
 
 ```python
 @kinetic.run(
-  accelerator="l4", base_image_repo="us-docker.pkg.dev/my-project/kinetic-base"
-)
-def train(): ...
-```
-:::
-
-::::
-
-See [`kinetic build-image`](#kinetic-build-image) for the full command reference.
-
-## Custom Image Mode
-
-Provide a full container image URI to use your own image. Kinetic skips all build and dependency steps.
-
-```python
-@kinetic.run(
-  accelerator="tpu-v6e-8",
+  accelerator="tpu-v5litepod-4",
   container_image="us-docker.pkg.dev/my-project/kinetic/my-image:v1.0",
 )
 def train(): ...
 ```
 
-### Requirements for custom images
+The image must satisfy these requirements:
 
-Your custom image must:
+* The Kinetic runner script is at `/app/remote_runner.py`. Kinetic
+starts the container with `python3 -u /app/remote_runner.py`, which
+replaces the `ENTRYPOINT` and `CMD` of the image. Copy the script from
+the `kinetic/runner/` directory of the installed package.
+* `python3` is on `PATH`, with the same minor version as your client.
+* The packages `cloudpickle`, `google-cloud-storage`, and `absl-py` are
+installed. The runner imports them.
+* Every other package that your function imports is installed.
+* We recommend that `keras-kinetic` is installed. The runner does not
+need it, but user code often imports it.
+* The GKE nodes can pull the image: Artifact Registry in the same
+project, or a public registry.
 
-1. Include `cloudpickle`, `google-cloud-storage`, `absl-py`, and a compatible Python environment. The runner imports these three packages at startup.
-2. Include the necessary dependencies for your function.
-3. Be accessible from the GKE nodes (e.g., Artifact Registry in the same GCP project, or a public registry).
+Kinetic still ships your project source with the job and extracts it on
+the pod. Do not copy your source into the image.
 
-### When to use custom images
-
-- **Complex dependencies**: Non-Python system libraries (CUDA builds, C++ libs) that aren't in the default template.
-- **Corporate compliance**: Base images vetted by your security or platform team.
-- **Full control**: When you want to manage the entire image lifecycle yourself.
-
+**Timing:** one image pull, then the function runs. The pull time depends
+on the image size and the registry.
 ## `kinetic build-image`
 
-Build and push prebuilt base images to a Docker Hub or Artifact Registry repository. One image is built per accelerator category (`cpu`, `gpu`, `tpu`) using Cloud Build.
+`kinetic build-image` builds base images with Cloud Build and pushes them
+to Docker Hub or to Artifact Registry. The command builds one image per
+accelerator category. The command needs an existing cluster: it uploads
+the build context to the builds bucket of the cluster and runs Cloud
+Build as the build service account of the cluster. Run `kinetic up`
+first.
 
 ```bash
-# Interactive mode — guides you through registry selection and setup
+# Interactive: the command asks for the registry and the settings.
 kinetic build-image
 
-# Non-interactive with Artifact Registry
+# Artifact Registry, without prompts.
 kinetic build-image \
   --repo us-docker.pkg.dev/my-project/kinetic-base \
   --project my-project \
   --yes
 
-# Build only GPU and TPU images
+# GPU and TPU images only.
 kinetic build-image --repo myuser/kinetic --category gpu --category tpu
 
-# Use a custom Dockerfile
+# A custom Dockerfile.
 kinetic build-image --repo myuser/kinetic --dockerfile ./Dockerfile.custom
 
-# Specific version tag (default: kinetic package version)
+# A specific tag. The default is the kinetic package version.
 kinetic build-image --repo myuser/kinetic --tag v2.0.0
 ```
-
-### Options
 
 | Option                 | Description                                                                                                                    |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
@@ -177,36 +231,57 @@ kinetic build-image --repo myuser/kinetic --tag v2.0.0
 | `--update-credentials` | Re-enter Docker Hub credentials even if they already exist in Secret Manager.                                                  |
 | `--yes`, `-y`          | Skip confirmation prompt.                                                                                                      |
 | `--project`            | GCP project ID (default: `KINETIC_PROJECT`).                                                                                   |
-| `--cluster`            | GKE cluster name (default: `kinetic-cluster`).                                                                                 |
+| `--cluster`            | GKE cluster name (default: `kinetic-cluster`).     
 
-### Registry support
+Registry notes:
 
-- **Docker Hub**: Credentials are stored in GCP Secret Manager and used by Cloud Build during the push. The command prompts for your Docker Hub username and access token on first use.
-- **Artifact Registry**: No additional credentials needed — the build service account authenticates automatically. The command prints the required `gcloud` setup commands for creating the repository and granting permissions.
+- **Docker Hub** — the command asks for your Docker Hub username and an
+  access token on first use, stores them in Secret Manager, and Cloud
+  Build uses them for the push.
+- **Artifact Registry** — no extra credentials. The build service
+  account pushes directly. The command prints the `gcloud` commands that
+  create the repository and grant the permissions.
+
+## How Kinetic decides
+
+At submit time, Kinetic reads `container_image`:
+
+1. `"prebuilt"` — resolve the base image for the accelerator category,
+   filter and upload the dependency file.
+2. `None` or `"bundled"` — hash the inputs, then reuse the cached image
+   or run Cloud Build.
+3. Any other string — use it as an image URI. No build, no install.
 
 ## Related pages
 
 ::::{grid} 1 1 2 2
 :gutter: 3
 
-:::{grid-item-card} {octicon}`zap;1em` Execution Modes
-:link: execution_modes
-:link-type: doc
-
-Start here for the high-level mode-selection guidance.
-:::
-
 :::{grid-item-card} {octicon}`package;1em` Dependencies
 :link: dependencies
 :link-type: doc
 
-What gets discovered and what gets installed in each mode.
+How Kinetic finds the dependency file, and what it filters out.
 :::
 
-:::{grid-item-card} {octicon}`gear;1em` Configuration
-:link: ../configuration
+:::{grid-item-card} {octicon}`file-directory;1em` What Ships to the Pod
+:link: packaging
 :link-type: doc
 
-`KINETIC_BASE_IMAGE_REPO` and other relevant env vars.
+The function, the source archive, and the Python version rule.
+:::
+
+:::{grid-item-card} {octicon}`graph;1em` Cost Optimization
+:link: cost_optimization
+:link-type: doc
+
+Cloud Build charges and how the image cache limits them.
+:::
+
+:::{grid-item-card} {octicon}`bug;1em` Troubleshooting
+:link: ../troubleshooting
+:link-type: doc
+
+Build failures and version-skew errors.
 :::
 ::::
