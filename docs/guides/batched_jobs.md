@@ -157,7 +157,9 @@ losses = batch.results(ordered=False)
   manifest is preserved so `attach_batch()` still works.
 - **`return_exceptions`** (`bool`, default `False`): When `True`, failed
   positions contain the exception object instead of raising
-  `BatchError`. When `False`, any failure raises `BatchError`.
+  `BatchError`. When `False`, any failure raises `BatchError`. A job
+  that fails and an input that fails at submission time both count as a
+  failure.
 
 :::{important}
 A `TimeoutError` does not cancel running jobs. They continue executing
@@ -191,26 +193,39 @@ results before the last inputs have been submitted.
 ## Handling failures
 
 When any job fails and `return_exceptions=False` (the default),
-`results()` raises a `BatchError`.
+`results()` raises a `BatchError`. An input that fails at submission
+time raises a `BatchError` too.
 
 ```python
 try:
   results = batch.results()
 except kinetic.BatchError as e:
-  print(
-    f"Batch {e.group_id}: {len(e.failures)} of {len(e.partial_results)} jobs failed"
-  )
+  print(e)  # Batch grp-a1b2c3d4: 2 of 8 jobs failed
   for job in e.failures:
-    print(f"  {job.job_id}: {job.status().value}")
+    print(f"  job {job.job_id}: {job.status().value}")
+  for index, exc in e.submission_failures.items():
+    print(f"  input {index} never started: {exc}")
   # e.partial_results has results at successful positions, None at failed ones
 ```
 
-`BatchError` provides three attributes:
+`BatchError` provides four attributes:
 
 - **`group_id`**: The batch identifier.
-- **`failures`**: List of `JobHandle` objects for the failed jobs.
-- **`partial_results`**: A list aligned with `inputs` where successful
-  positions contain the result and failed positions contain `None`.
+- **`failures`**: A list of `JobHandle` objects for the jobs that
+  started and then failed. The list holds only `JobHandle` objects, so
+  `job.job_id` and `job.status()` are always safe to call.
+- **`submission_failures`**: A dict that maps an input index to the
+  exception from the submission of that input. These inputs never
+  became jobs. They have no `JobHandle`, and they never appear in
+  `failures`.
+- **`partial_results`**: A list aligned with `inputs`. A successful
+  position holds the result. A failed position holds `None`.
+
+:::{note}
+`partial_results` aligns with `inputs` only for the default
+`ordered=True`. With `ordered=False`, it holds the results that
+`results()` collected, in completion order.
+:::
 
 ### Tolerating failures
 
@@ -228,15 +243,27 @@ for i, r in enumerate(results):
 
 ### Inspecting failures
 
-`failures()` returns handles for jobs with status `FAILED`. It
-intentionally excludes `NOT_FOUND` because that status is ambiguous —
-a job may be `NOT_FOUND` because its Kubernetes resources were cleaned
-up, not because it failed. Use `statuses()` for finer-grained
-inspection.
+`failures()` returns handles for the jobs with status `FAILED`. It
+excludes `NOT_FOUND`, because that status is ambiguous. A job can be
+`NOT_FOUND` because Kinetic cleaned up its Kubernetes resources, and
+not because the job failed. Use `statuses()` for a more exact view.
+
+After `results()` runs, `failures()` returns the failures from that
+collection pass, and not the live status of each job. This keeps the
+list correct after `cleanup=True` deletes the Kubernetes resources.
 
 ```python
 for job in batch.failures():
   print(f"{job.job_id}: {job.tail(n=20)}")
+```
+
+`failures()` reports only the jobs that started. To see the inputs that
+failed before they became jobs, read `submission_failures`. It maps the
+input index to the exception from that submission.
+
+```python
+for index, exc in batch.submission_failures.items():
+  print(f"input {index} failed to submit: {exc}")
 ```
 
 ## Retries
@@ -256,13 +283,16 @@ batch = train.run_async_map(configs, retries=2)
   Kubernetes resources (GCS artifacts are preserved for debugging).
 - The group manifest tracks the attempt count per job, so
   `attach_batch()` can distinguish retries from initial submissions.
-- Submission errors (when the call to the function itself raises) are
-  not retried. These are typically packaging or configuration errors
-  that would fail again.
+- Kinetic does not retry a submission error, which is an error that the
+  call to the function raises. These errors are usually packaging errors
+  or configuration errors, and they fail again.
+- Kinetic does not retry a cancelled job. `cancel()` marks its children,
+  so the `NOT_FOUND` status that cancellation causes never starts a new
+  attempt.
 
 :::{note}
-When `retries > 0`, job submission runs in a background thread so
-Kinetic can poll for failures and resubmit.
+When `retries > 0`, job submission runs in a background thread. This
+lets Kinetic poll for failures and submit the input again.
 :::
 
 ## Concurrency control
@@ -280,12 +310,18 @@ batch = train.run_async_map(configs, max_concurrent=8)
 batch = train.run_async_map(configs, max_concurrent=None)
 ```
 
-- **Default:** `64`. New jobs are launched as running ones finish.
-- **`None`:** All inputs are submitted immediately with no concurrency
-  limit. When combined with `retries=0` (the default), submission
-  happens synchronously in the calling thread before `map()` returns.
+- **Default:** `64`. Kinetic launches a new job each time a running job
+  finishes.
+- **`None`:** Kinetic submits all inputs immediately, with no
+  concurrency limit. The calling thread does this work when `retries=0`
+  and when `fail_fast` and `cancel_running_on_fail` are not both `True`.
+  See [Threading model](#threading-model).
 - Must be a positive integer when set. Passing `0` or a negative value
   raises `ValueError`.
+
+In every case `run_async_map()` returns the `BatchHandle` as soon as the
+submission work is handed off or complete. It never waits for the jobs
+to finish. Use `wait()` or `results()` when you want to block.
 
 :::{note}
 Kinetic logs a warning when submitting more than 100 jobs with
@@ -316,21 +352,36 @@ batch = train.run_async_map(
 )
 ```
 
-A "failure" here means either a submission error (
-the call raised) or a runtime failure (the remote job reached
-`FAILED` or `NOT_FOUND` status after exhausting retries).
+A failure is one of two events. The first is a submission error, when
+the call raises. The second is a runtime failure, when the remote job
+reaches `FAILED` or `NOT_FOUND` status after all of its attempts.
 
 ### Manual cancellation
 
-You can cancel all non-terminal jobs at any time, independent of the
-`fail_fast` setting:
+`cancel()` stops the full collection at any time. It is independent of
+the `fail_fast` setting.
 
 ```python
 batch.cancel()
 ```
 
-Cancellation deletes each job's Kubernetes resource but preserves GCS
-artifacts for debugging.
+`cancel()` does three things:
+
+- It deletes the Kubernetes resource of each job that is not terminal.
+  The GCS artifacts of that job stay in place for debugging.
+- It drops the inputs that `max_concurrent` holds in the queue. Kinetic
+  does not launch them.
+- It marks the children as cancelled. Kinetic does not submit them
+  again, even when `retries` is above zero.
+
+A cancelled job reports the status `NOT_FOUND`, because its Kubernetes
+resource is gone. `wait()` returns after each job that started is
+terminal, and the slot of an input that never launched stays `None`.
+
+A cancelled job has no result. `results()` therefore raises a
+`BatchError` that lists those jobs in `failures`. Use
+`results(return_exceptions=True)` to read the results of the children
+that finished before the cancellation.
 
 ## Reattaching to a batch
 
@@ -347,15 +398,19 @@ batch = kinetic.attach_batch("grp-a1b2c3d4")
 results = batch.results()
 ```
 
-`attach_batch()` downloads the group manifest from GCS and reconstructs
-a `JobHandle` for each child. Index alignment is preserved: if the
-original batch had 10 inputs and only 7 were submitted before a crash,
-the returned `batch.jobs` list has 10 entries with `None` in the 3
-unsubmitted slots.
+`attach_batch()` downloads the group manifest from GCS and rebuilds a
+`JobHandle` for each child. It keeps the index alignment. If the
+original batch had 10 inputs, and a crash stopped it after 7, the
+`batch.jobs` list still has 10 entries. The 3 empty slots hold `None`.
+
+If the manifest names fewer children than the batch expects, the
+original `map()` is still at work. The handle then polls the manifest in
+a background thread until the rest of the children appear, or until
+`poll_timeout` ends the poll.
 
 :::{note}
-Kinetic logs a warning when a reattached batch has fewer children than
-expected, indicating partial submission.
+Kinetic writes a warning when the manifest of a reattached batch names
+fewer children than expected. This shows a partial submission.
 :::
 
 **Parameters:**
@@ -365,6 +420,40 @@ expected, indicating partial submission.
   default when `None`.
 - **`cluster`** (`str | None`, default `None`): GKE cluster name. Uses
   the default when `None`.
+- **`poll_interval`** (`float`, default `10.0`): Seconds between
+  manifest polls while the batch is partially submitted.
+- **`poll_timeout`** (`float | None`, default `1800.0`): Maximum seconds
+  to poll for the remaining children. After the timeout, the handle
+  reports the submission as complete, and the empty slots stay `None`.
+  Reattach again to pick up the children that started since then.
+  `None` polls forever. Use `None` only when you are sure that the
+  original process is alive, because a dead submitter then blocks
+  `wait()` and `results()` forever.
+
+### Children that Kinetic cleaned up
+
+`results(cleanup=True)` deletes the GCS artifacts of each child that
+gives a result, and the `handle.json` file of the child is one of those
+artifacts. The group manifest stays in place, so `attach_batch()` still
+finds the batch. But it cannot rebuild a `JobHandle` for a child that it
+cleaned up.
+
+Kinetic treats such a child as terminal, and not as a child that is
+still on the way. The batch reports the submission as complete, and
+`wait()` and `results()` return immediately. The slot of that child
+stays `None`, and `results()` gives `None` at that position.
+
+`unavailable_children` shows which children are in this state. It maps
+the child index to the job ID from the manifest.
+
+```python
+batch = kinetic.attach_batch("grp-a1b2c3d4")
+print(batch.unavailable_children)
+# {0: 'job-1a2b3c4d', 1: 'job-5e6f7a8b'}
+```
+
+A `None` slot that `unavailable_children` does not name is an input that
+the original `map()` never submitted.
 
 ## Cleanup
 
@@ -380,6 +469,13 @@ manifest is preserved, so `attach_batch()` still works.
 # Each child is cleaned up as its result is downloaded
 results = batch.results()  # cleanup=True is the default
 ```
+
+:::{important}
+This cleanup deletes the result of each child. A later `attach_batch()`
+cannot collect those results a second time. Use `cleanup=False` when you
+want to reattach later and read the results again. See
+[Children that Kinetic cleaned up](#children-that-kinetic-cleaned-up).
+:::
 
 ### Full teardown
 
@@ -406,15 +502,30 @@ via `attach_batch()` because the manifest has been deleted.
 
 ### Threading model
 
-When `max_concurrent` is set (the default is 64) or `retries > 0`,
-`run_async_map()` launches a non-daemon background thread to manage
-submissions. The thread polls active jobs for terminal states and
-launches new ones as concurrency slots free up. The `BatchHandle` is
-returned immediately.
+`run_async_map()` uses a non-daemon background thread when the
+submission loop must watch the jobs after it launches them. Three
+settings need this:
 
-When `max_concurrent=None` and `retries=0`, all jobs are submitted
-synchronously in the calling thread before `map()` returns. No
-background thread is created.
+- `max_concurrent` is set. The default is 64. The loop must wait for a
+  free slot before it launches the next input.
+- `retries` is above zero. The loop must see a failure before it can
+  submit that input again.
+- `fail_fast` and `cancel_running_on_fail` are both `True`. The loop
+  must see the first failure before it can cancel the siblings.
+
+In these cases the thread polls the active jobs, launches new jobs, and
+cancels jobs. `run_async_map()` returns the `BatchHandle` immediately.
+
+In all other cases the calling thread submits every input, and then
+`run_async_map()` returns. Kinetic starts no background thread, and the
+loop does not poll the jobs. A terminal status cannot change what the
+loop does next, so the loop stops as soon as the last input is
+submitted.
+
+`fail_fast` on its own is such a case. A submission error still stops
+the queue immediately, because the loop sees it inside the same
+submission pass. But after every input is launched, a runtime failure
+has nothing left for the loop to stop.
 
 ### Manifest
 
@@ -433,11 +544,17 @@ Each batch gets a unique identifier in the format `grp-{8-hex-chars}`
 
 ### Submission errors
 
-If a call to the function itself raises (e.g., a packaging or validation
-error), the exception is captured internally and the corresponding slot
-in `batch.jobs` remains `None`. These errors are surfaced when you call
-`results()` — either as entries in the `BatchError.partial_results`
-list or as exception objects when `return_exceptions=True`.
+A call to the function can raise, for example with a packaging error or
+a validation error. Kinetic then keeps the exception, and the related
+slot in `batch.jobs` stays `None`. Read these errors from
+`batch.submission_failures`, which maps the input index to the
+exception.
+
+`results()` reports them too. With `return_exceptions=True`, it puts the
+exception at that position in the result list. With
+`return_exceptions=False`, it raises a `BatchError` that holds the same
+map in `BatchError.submission_failures`. These inputs never became
+jobs, so `BatchError.failures` does not list them.
 
 ## Related pages
 

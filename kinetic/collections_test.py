@@ -4,10 +4,13 @@ import json
 import os
 import tempfile
 import threading
+import time
 from unittest import mock
 
-from absl.testing import absltest
+from absl.testing import absltest, parameterized
+from google.api_core import exceptions as google_exceptions
 
+from kinetic import collections as kinetic_collections
 from kinetic.collections import (
   BatchError,
   BatchHandle,
@@ -16,6 +19,21 @@ from kinetic.collections import (
 )
 from kinetic.job_status import JobStatus
 from kinetic.jobs import JobHandle
+
+# Captured before any test patches `time.sleep`, which the collections
+# module reaches through the shared `time` module object.
+_REAL_SLEEP = time.sleep
+
+
+def _tick(_seconds=0):
+  """Stand-in for `time.sleep` that yields instead of honouring the delay.
+
+  Poll loops that a test drives from another thread must keep turning
+  without burning a core, so this sleeps for a token millisecond rather
+  than returning instantly.
+  """
+  _REAL_SLEEP(0.001)
+
 
 # ------------------------------------------------------------------
 # Helpers
@@ -910,8 +928,6 @@ class TestAttachBatch(absltest.TestCase):
     """Missing handle.json should leave a None at the correct index."""
     manifest = self._make_manifest(2)
 
-    from google.api_core import exceptions as google_exceptions
-
     def download_side_effect(bucket, job_id, project=None):
       if job_id == "job-1":
         raise google_exceptions.NotFound("gone")
@@ -1000,8 +1016,10 @@ class TestSubmissionErrors(absltest.TestCase):
       with self.assertRaises(BatchError) as ctx:
         handle.results()
 
-    # Index 1 failed at submission time.
-    self.assertEqual(len(ctx.exception.failures), 1)
+    # Index 1 failed at submission time.  No job exists for it, so it is
+    # reported through submission_failures and never lands in failures.
+    self.assertEqual(ctx.exception.failures, [])
+    self.assertIsInstance(ctx.exception.submission_failures[1], RuntimeError)
 
   def test_submission_error_with_return_exceptions(self):
     """Per-input submission failures should appear as exceptions."""
@@ -1454,6 +1472,600 @@ class TestAttachBatchPolling(absltest.TestCase):
     self.assertTrue(handle._submission_complete.is_set())
     self.assertIsNotNone(handle.jobs[0])
     self.assertIsNotNone(handle.jobs[1])
+
+
+# ------------------------------------------------------------------
+# cancel() — stops launching, and cancelled jobs are never retried
+# ------------------------------------------------------------------
+
+
+class TestCancelStopsLaunching(absltest.TestCase):
+  """`cancel()` must cover queued inputs, not only running jobs."""
+
+  def _submit_fn(self, submitted, first_submitted):
+    def submit_fn(x):
+      submitted.append(x)
+      first_submitted.set()
+      return _make_handle(job_id=f"job-{x}")
+
+    submit_fn.__name__ = "fn"
+    return submit_fn
+
+  def test_cancel_drops_queued_inputs(self):
+    """With bounded concurrency, queued inputs must not launch after cancel."""
+    submitted = []
+    first_submitted = threading.Event()
+    cancelled = set()
+
+    def mock_status(self_handle):
+      if self_handle.job_id in cancelled:
+        return JobStatus.NOT_FOUND
+      return JobStatus.RUNNING
+
+    def track_cancel(self_handle):
+      cancelled.add(self_handle.job_id)
+
+    with (
+      mock.patch("kinetic.collections.storage.upload_manifest"),
+      mock.patch("kinetic.collections.storage.upload_handle"),
+      mock.patch("kinetic.collections.time.sleep", _tick),
+      mock.patch.object(JobHandle, "status", mock_status),
+      mock.patch.object(JobHandle, "cancel", track_cancel),
+    ):
+      handle = map(
+        self._submit_fn(submitted, first_submitted),
+        [0, 1, 2],
+        max_concurrent=1,
+        project="proj",
+        cluster="cluster",
+      )
+      self.assertTrue(first_submitted.wait(timeout=5))
+      handle.cancel()
+      self.assertTrue(handle._submission_complete.wait(timeout=5))
+
+    # Only the job that was already running got submitted; indices 1 and
+    # 2 were still queued behind max_concurrent=1 and are dropped.
+    self.assertEqual(submitted, [0])
+    self.assertEqual(cancelled, {"job-0"})
+    self.assertIsNone(handle.jobs[1])
+    self.assertIsNone(handle.jobs[2])
+
+  def test_cancel_does_not_resubmit_with_retries(self):
+    """Cancelling turns a job NOT_FOUND; retries must not resurrect it."""
+    submitted = []
+    first_submitted = threading.Event()
+    cancelled = set()
+
+    def mock_status(self_handle):
+      if self_handle.job_id in cancelled:
+        return JobStatus.NOT_FOUND
+      return JobStatus.RUNNING
+
+    def track_cancel(self_handle):
+      cancelled.add(self_handle.job_id)
+
+    with (
+      mock.patch("kinetic.collections.storage.upload_manifest"),
+      mock.patch("kinetic.collections.storage.upload_handle"),
+      mock.patch("kinetic.collections.time.sleep", _tick),
+      mock.patch.object(JobHandle, "status", mock_status),
+      mock.patch.object(JobHandle, "cancel", track_cancel),
+      mock.patch.object(JobHandle, "cleanup") as mock_cleanup,
+    ):
+      handle = map(
+        self._submit_fn(submitted, first_submitted),
+        [0],
+        max_concurrent=1,
+        retries=2,
+        project="proj",
+        cluster="cluster",
+      )
+      self.assertTrue(first_submitted.wait(timeout=5))
+      handle.cancel()
+      self.assertTrue(handle._submission_complete.wait(timeout=5))
+
+    self.assertEqual(submitted, [0])
+    # The retry path cleans up the previous attempt's K8s resources
+    # before it re-queues the index.  Nothing may go down that path, or
+    # the loop is still treating the cancelled job as a failed attempt.
+    mock_cleanup.assert_not_called()
+
+  def test_cancel_catches_job_launched_during_cancel(self):
+    """A slot filled after cancel() snapshotted it must still be cancelled.
+
+    `cancel()` sets its flag before reading `handle.jobs`, so a
+    submission already in flight lands after the snapshot.  Closing that
+    window is the submission loop's job.
+    """
+    entered_second = threading.Event()
+    release_second = threading.Event()
+
+    def submit_fn(x):
+      if x == 1:
+        entered_second.set()
+        self.assertTrue(release_second.wait(timeout=5))
+      return _make_handle(job_id=f"job-{x}")
+
+    submit_fn.__name__ = "fn"
+
+    cancelled = set()
+
+    def mock_status(self_handle):
+      if self_handle.job_id in cancelled:
+        return JobStatus.NOT_FOUND
+      return JobStatus.RUNNING
+
+    def track_cancel(self_handle):
+      cancelled.add(self_handle.job_id)
+
+    with (
+      mock.patch("kinetic.collections.storage.upload_manifest"),
+      mock.patch("kinetic.collections.storage.upload_handle"),
+      mock.patch("kinetic.collections.time.sleep", _tick),
+      mock.patch.object(JobHandle, "status", mock_status),
+      mock.patch.object(JobHandle, "cancel", track_cancel),
+    ):
+      handle = map(
+        submit_fn,
+        [0, 1],
+        max_concurrent=2,
+        project="proj",
+        cluster="cluster",
+      )
+      self.assertTrue(entered_second.wait(timeout=5))
+      # job-1 has not been registered yet, so cancel() cannot see it.
+      handle.cancel()
+      release_second.set()
+      self.assertTrue(handle._submission_complete.wait(timeout=5))
+
+    self.assertEqual(cancelled, {"job-0", "job-1"})
+
+  def test_cancel_lets_as_completed_finish(self):
+    """Slots cancelled before launch must not stall as_completed()."""
+    handle = _make_batch_handle(n_jobs=1, submission_complete=False)
+    handle.jobs.extend([None, None])
+
+    cancelled = set()
+
+    def mock_status(self_handle):
+      if self_handle.job_id in cancelled:
+        return JobStatus.NOT_FOUND
+      return JobStatus.RUNNING
+
+    def track_cancel(self_handle):
+      cancelled.add(self_handle.job_id)
+
+    with (
+      mock.patch.object(JobHandle, "status", mock_status),
+      mock.patch.object(JobHandle, "cancel", track_cancel),
+      mock.patch("kinetic.collections.time.sleep"),
+    ):
+      handle.cancel()
+      # Stands in for the submission loop, which this test does not run.
+      handle._submission_complete.set()
+      yielded = list(handle.as_completed(poll_interval=0.01, timeout=5))
+
+    self.assertEqual(cancelled, {"job-0"})
+    # The two slots that never held a job must not stall the iterator.
+    self.assertEqual([j.job_id for j in yielded], ["job-0"])
+
+
+# ------------------------------------------------------------------
+# attach_batch() after the children were cleaned up
+# ------------------------------------------------------------------
+
+
+class TestAttachAfterChildCleanup(absltest.TestCase):
+  """`results(cleanup=True)` deletes each child's whole GCS prefix.
+
+  The group manifest survives, so a later `attach_batch()` sees children
+  it can name but whose `handle.json` is gone.  Those slots are terminal,
+  not pending — polling for them would block `wait()` forever.
+  """
+
+  def _manifest(self, n_children=2, total_expected=None):
+    if total_expected is None:
+      total_expected = n_children
+    return {
+      "group_id": "grp-abc12345",
+      "group_kind": "map",
+      "group_name": "test-batch",
+      "tags": {},
+      "created_at": "2026-03-28T10:00:00Z",
+      "total_expected": total_expected,
+      "submit_fn_name": "train",
+      "children": [
+        {"group_index": i, "job_id": f"job-{i}", "attempts": 1}
+        for i in range(n_children)
+      ],
+    }
+
+  def _attach(self, manifest, **kwargs):
+    with (
+      mock.patch(
+        "kinetic.collections.storage.download_manifest",
+        return_value=manifest,
+      ),
+      mock.patch(
+        "kinetic.collections.storage.download_handle",
+        side_effect=google_exceptions.NotFound("artifacts deleted"),
+      ),
+    ):
+      return attach_batch(
+        "grp-abc12345", project="proj", cluster="cluster", **kwargs
+      )
+
+  def test_completes_without_starting_a_poll_thread(self):
+    with mock.patch.object(threading.Thread, "start") as mock_start:
+      handle = self._attach(self._manifest(2))
+
+    mock_start.assert_not_called()
+    self.assertTrue(handle._submission_complete.is_set())
+    self.assertEqual(handle.jobs, [None, None])
+
+  def test_unavailable_children_names_the_missing_jobs(self):
+    handle = self._attach(self._manifest(2))
+    self.assertEqual(handle.unavailable_children, {0: "job-0", 1: "job-1"})
+    # The property hands back a copy, not the live mapping.
+    handle.unavailable_children[9] = "job-9"
+    self.assertNotIn(9, handle.unavailable_children)
+
+  def test_wait_returns_instead_of_blocking(self):
+    handle = self._attach(self._manifest(2))
+    with mock.patch("kinetic.collections.time.sleep") as mock_sleep:
+      handle.wait(timeout=5)
+    mock_sleep.assert_not_called()
+
+  def test_results_return_none_without_blocking(self):
+    handle = self._attach(self._manifest(2))
+    with mock.patch("kinetic.collections.time.sleep"):
+      results = handle.results(timeout=5)
+    self.assertEqual(results, [None, None])
+
+  def test_results_warns_about_unavailable_children(self):
+    handle = self._attach(self._manifest(2))
+    with (
+      mock.patch("kinetic.collections.time.sleep"),
+      mock.patch("kinetic.collections.logging") as mock_logging,
+    ):
+      handle.results(timeout=5)
+
+    warnings = [c[0][0] for c in mock_logging.warning.call_args_list]
+    self.assertTrue(
+      any("have no handle in GCS" in w for w in warnings),
+      f"expected an unavailable-children warning, got {warnings}",
+    )
+
+  def test_as_completed_terminates(self):
+    handle = self._attach(self._manifest(2))
+    with mock.patch("kinetic.collections.time.sleep"):
+      yielded = list(handle.as_completed(poll_interval=0.01, timeout=5))
+    self.assertEqual(yielded, [])
+
+  def test_genuinely_partial_batch_still_polls(self):
+    """A manifest short of total_expected is still worth waiting on."""
+    with mock.patch.object(threading.Thread, "start") as mock_start:
+      handle = self._attach(self._manifest(n_children=1, total_expected=3))
+
+    mock_start.assert_called_once()
+    self.assertFalse(handle._submission_complete.is_set())
+    # Cleared so the daemon thread that never started cannot strand
+    # anything waiting on this handle.
+    handle._submission_complete.set()
+
+  def test_poll_thread_gets_a_bounded_default_timeout(self):
+    recorded = {}
+
+    def fake_poll_loop(**kwargs):
+      recorded.update(kwargs)
+      kwargs["handle"]._submission_complete.set()
+
+    with mock.patch("kinetic.collections._manifest_poll_loop", fake_poll_loop):
+      handle = self._attach(self._manifest(n_children=1, total_expected=3))
+      self.assertTrue(handle._submission_complete.wait(timeout=5))
+
+    self.assertIsNotNone(recorded["timeout"])
+    self.assertEqual(
+      recorded["timeout"],
+      kinetic_collections._DEFAULT_MANIFEST_POLL_TIMEOUT,
+    )
+
+  def test_poll_loop_stops_once_every_child_is_named(self):
+    """Polling ends on manifest coverage, not on handles that load."""
+    partial = self._manifest(n_children=1, total_expected=2)
+    full = self._manifest(n_children=2, total_expected=2)
+
+    manifest_calls = [0]
+
+    def download_manifest_side_effect(bucket, group_id, project=None):
+      manifest_calls[0] += 1
+      return partial if manifest_calls[0] <= 1 else full
+
+    def download_handle_side_effect(bucket, job_id, project=None):
+      if job_id == "job-1":
+        raise google_exceptions.NotFound("artifacts deleted")
+      return {
+        "job_id": job_id,
+        "backend": "gke",
+        "project": "proj",
+        "cluster_name": "cluster",
+        "zone": "us-central1-a",
+        "namespace": "default",
+        "bucket_name": "proj-kn-cluster-jobs",
+        "k8s_name": f"kinetic-{job_id}",
+        "image_uri": "image:tag",
+        "accelerator": "cpu",
+        "func_name": "train",
+        "display_name": f"kinetic-train-{job_id}",
+        "created_at": "2026-03-28T10:00:00Z",
+        "group_id": "grp-abc12345",
+        "group_kind": "map",
+        "group_index": 0,
+      }
+
+    with (
+      mock.patch(
+        "kinetic.collections.storage.download_manifest",
+        side_effect=download_manifest_side_effect,
+      ),
+      mock.patch(
+        "kinetic.collections.storage.download_handle",
+        side_effect=download_handle_side_effect,
+      ),
+      mock.patch("kinetic.collections.time.sleep", _tick),
+    ):
+      handle = attach_batch(
+        "grp-abc12345",
+        project="proj",
+        cluster="cluster",
+        poll_interval=0.01,
+      )
+      self.assertTrue(handle._submission_complete.wait(timeout=5))
+
+    self.assertIsNotNone(handle.jobs[0])
+    self.assertIsNone(handle.jobs[1])
+    self.assertEqual(handle.unavailable_children, {1: "job-1"})
+
+
+# ------------------------------------------------------------------
+# BatchError — failures hold real handles, submission errors are separate
+# ------------------------------------------------------------------
+
+
+class TestBatchErrorFailureReporting(absltest.TestCase):
+  def _mixed_batch_handle(self):
+    """A batch with one submission error and one runtime failure."""
+
+    def failing_submit(x):
+      if x == 1:
+        raise RuntimeError("bad input")
+      return _make_handle(job_id=f"job-{x}")
+
+    failing_submit.__name__ = "fn"
+
+    with (
+      mock.patch("kinetic.collections.storage.upload_manifest"),
+      mock.patch("kinetic.collections.storage.upload_handle"),
+    ):
+      return map(
+        failing_submit,
+        [0, 1, 2],
+        max_concurrent=None,
+        project="proj",
+        cluster="cluster",
+      )
+
+  def _collect(self, handle, **kwargs):
+    def mock_result(self_handle, cleanup=True):
+      if self_handle.job_id == "job-2":
+        raise ValueError("job-2 failed at runtime")
+      return 42
+
+    with (
+      mock.patch.object(JobHandle, "status", return_value=JobStatus.SUCCEEDED),
+      mock.patch.object(JobHandle, "result", mock_result),
+      mock.patch("kinetic.collections.time.sleep"),
+    ):
+      return handle.results(**kwargs)
+
+  def test_documented_failure_loop_does_not_raise(self):
+    """`for job in e.failures: job.job_id` is documented — it must work."""
+    handle = self._mixed_batch_handle()
+    with self.assertRaises(BatchError) as ctx:
+      self._collect(handle, cleanup=False)
+
+    job_ids = [job.job_id for job in ctx.exception.failures]
+    self.assertEqual(job_ids, ["job-2"])
+
+  def test_submission_errors_reach_the_caller(self):
+    handle = self._mixed_batch_handle()
+    with self.assertRaises(BatchError) as ctx:
+      self._collect(handle, cleanup=False)
+
+    err = ctx.exception
+    self.assertEqual(sorted(err.submission_failures), [1])
+    self.assertIsInstance(err.submission_failures[1], RuntimeError)
+    # Both kinds of failure are counted in the message.
+    self.assertIn("2 of 3", str(err))
+
+  def test_submission_error_alone_still_raises(self):
+    """A batch whose jobs all succeed but whose input failed must raise."""
+
+    def failing_submit(x):
+      if x == 1:
+        raise RuntimeError("bad input")
+      return _make_handle(job_id=f"job-{x}")
+
+    failing_submit.__name__ = "fn"
+
+    with (
+      mock.patch("kinetic.collections.storage.upload_manifest"),
+      mock.patch("kinetic.collections.storage.upload_handle"),
+    ):
+      handle = map(
+        failing_submit,
+        [0, 1],
+        max_concurrent=None,
+        project="proj",
+        cluster="cluster",
+      )
+
+    with (
+      mock.patch.object(JobHandle, "status", return_value=JobStatus.SUCCEEDED),
+      mock.patch.object(JobHandle, "result", return_value=42),
+      mock.patch("kinetic.collections.time.sleep"),
+      self.assertRaises(BatchError) as ctx,
+    ):
+      handle.results(cleanup=False)
+
+    self.assertEqual(ctx.exception.failures, [])
+    self.assertIsInstance(ctx.exception.submission_failures[1], RuntimeError)
+
+  def test_completion_order_failures_are_handles_too(self):
+    handle = self._mixed_batch_handle()
+    with self.assertRaises(BatchError) as ctx:
+      self._collect(handle, ordered=False, cleanup=False)
+
+    # Named explicitly: an empty list would satisfy an all() check while
+    # hiding the completion-order path dropping failures altogether.
+    self.assertEqual([job.job_id for job in ctx.exception.failures], ["job-2"])
+    self.assertIsInstance(ctx.exception.submission_failures[1], RuntimeError)
+
+  def test_handle_exposes_the_same_submission_failures(self):
+    handle = self._mixed_batch_handle()
+    self.assertIsInstance(handle.submission_failures[1], RuntimeError)
+
+  def test_submission_failures_default_to_empty(self):
+    """The three-argument constructor stays valid."""
+    err = BatchError("grp-123", [_make_handle()], [None, 42])
+    self.assertEqual(err.submission_failures, {})
+
+  def test_submission_failures_are_copied(self):
+    source = {1: RuntimeError("bad input")}
+    err = BatchError("grp-123", [], [None, None], source)
+    source[2] = ValueError("injected")
+    self.assertEqual(sorted(err.submission_failures), [1])
+
+
+# ------------------------------------------------------------------
+# Threading decision — map() must hand back a handle, not block
+# ------------------------------------------------------------------
+
+
+class TestRunsInCallingThread(parameterized.TestCase):
+  @parameterized.named_parameters(
+    # (max_concurrent, retries, fail_fast, cancel_running_on_fail, expected)
+    ("plain", None, 0, False, False, True),
+    ("fail_fast_only", None, 0, True, False, True),
+    ("cancel_flag_without_fail_fast", None, 0, False, True, True),
+    ("fail_fast_and_cancel", None, 0, True, True, False),
+    ("bounded_concurrency", 8, 0, False, False, False),
+    ("retries", None, 1, False, False, False),
+    ("bounded_with_fail_fast", 8, 0, True, False, False),
+  )
+  def test_decision(
+    self, max_concurrent, retries, fail_fast, cancel_running_on_fail, expected
+  ):
+    self.assertEqual(
+      kinetic_collections._runs_in_calling_thread(
+        max_concurrent, retries, fail_fast, cancel_running_on_fail
+      ),
+      expected,
+    )
+
+  def test_fail_fast_returns_a_handle_without_waiting(self):
+    """fail_fast alone must not make map() wait for the jobs to finish.
+
+    With everything submitted, no retries, and no siblings to cancel, a
+    terminal status changes nothing the loop could act on — so the loop
+    has no reason to poll, and map() has no reason to block.
+    """
+    polled = []
+
+    def submit_fn(x):
+      return _make_handle(job_id=f"job-{x}")
+
+    submit_fn.__name__ = "fn"
+
+    def mock_status(self_handle):
+      polled.append(self_handle.job_id)
+      return JobStatus.SUCCEEDED
+
+    with (
+      mock.patch("kinetic.collections.storage.upload_manifest"),
+      mock.patch("kinetic.collections.storage.upload_handle"),
+      mock.patch("kinetic.collections.time.sleep") as mock_sleep,
+      mock.patch.object(JobHandle, "status", mock_status),
+      mock.patch.object(threading.Thread, "start") as mock_start,
+    ):
+      handle = map(
+        submit_fn,
+        [0, 1, 2],
+        max_concurrent=None,
+        retries=0,
+        fail_fast=True,
+        project="proj",
+        cluster="cluster",
+      )
+
+    self.assertTrue(handle._submission_complete.is_set())
+    self.assertEqual(len([j for j in handle.jobs if j is not None]), 3)
+    # No background thread, and no waiting on the jobs it just launched.
+    mock_start.assert_not_called()
+    mock_sleep.assert_not_called()
+    self.assertEqual(polled, [])
+
+  def test_fail_fast_with_cancel_keeps_the_background_thread(self):
+    """Cancelling siblings needs someone watching for the first failure."""
+
+    def submit_fn(x):
+      return _make_handle(job_id=f"job-{x}")
+
+    submit_fn.__name__ = "fn"
+
+    cancelled = set()
+
+    def mock_status(self_handle):
+      if self_handle.job_id == "job-0":
+        return JobStatus.FAILED
+      if self_handle.job_id in cancelled:
+        return JobStatus.NOT_FOUND
+      return JobStatus.RUNNING
+
+    def track_cancel(self_handle):
+      cancelled.add(self_handle.job_id)
+
+    started_threads = []
+    original_start = threading.Thread.start
+
+    def capture_start(self_thread):
+      started_threads.append(self_thread)
+      original_start(self_thread)
+
+    with (
+      mock.patch("kinetic.collections.storage.upload_manifest"),
+      mock.patch("kinetic.collections.storage.upload_handle"),
+      mock.patch("kinetic.collections.time.sleep", _tick),
+      mock.patch.object(JobHandle, "status", mock_status),
+      mock.patch.object(JobHandle, "cancel", track_cancel),
+      mock.patch.object(threading.Thread, "start", capture_start),
+    ):
+      handle = map(
+        submit_fn,
+        [0, 1],
+        max_concurrent=None,
+        retries=0,
+        fail_fast=True,
+        cancel_running_on_fail=True,
+        project="proj",
+        cluster="cluster",
+      )
+      self.assertTrue(handle._submission_complete.wait(timeout=5))
+
+    self.assertEqual(cancelled, {"job-1"})
+    # The cancellation above can only happen off the calling thread.
+    self.assertEqual(len(started_threads), 1)
+    self.assertFalse(started_threads[0].daemon)
 
 
 if __name__ == "__main__":
