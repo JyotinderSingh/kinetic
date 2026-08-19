@@ -315,7 +315,6 @@ import jax
 
 if jax.process_index() == 0:
   print(f"epoch {epoch}: loss={loss}")
-
 ```
 
 Kinetic does not stream the logs of the other hosts. Read them with

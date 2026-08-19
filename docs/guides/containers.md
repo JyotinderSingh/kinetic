@@ -171,7 +171,6 @@ that your function imports.
   container_image="us-docker.pkg.dev/my-project/kinetic/my-image:v1.0",
 )
 def train(): ...
-
 ```
 
 The image must satisfy these requirements:

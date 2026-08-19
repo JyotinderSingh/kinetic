@@ -133,7 +133,6 @@ def train(): ...
 
 train()  # writes checkpoints under gs://my-bucket/runs/exp-01
 train()  # finds them and resumes
-
 ```
 
 

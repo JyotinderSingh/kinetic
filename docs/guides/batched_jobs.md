@@ -223,7 +223,6 @@ time raises a `BatchError` too.
 try:
   results = batch.results(cleanup=False)
 except kinetic.BatchError as e:
-
   print(e)  # "Batch grp-a1b2c3d4: 2 of 8 jobs failed"
   for job in e.failures:
     print(f"{job.job_id}: {job.status().value}")
@@ -266,7 +265,6 @@ After `results()` has run, `failures()` returns the failures from that collectio
 batch.wait()
 for job in batch.failures():
   print(f"{job.job_id}: {job.tail(n=20)}")
-
 ```
 
 `job.tail()` reads the pod log, so call it while the pod exists. Call it after `wait()` and before `results()`, or after `results(cleanup=False)`, within the 10-minute Kubernetes retention window.
@@ -280,7 +278,6 @@ The call that submits an input can raise, for example because of a packaging or 
 ```python
 for index, exc in batch.submission_failures.items():
   print(f"input {index} failed to submit: {exc}")
-
 ```
 
 ## Retries
@@ -290,7 +287,6 @@ The `retries` argument sets the number of additional attempts that an input gets
 ```python
 batch = train.run_async_map(configs, retries=2)
 # Each input gets up to 3 attempts (1 initial + 2 retries)
-
 ```
 
 * Kinetic starts a retry when a job reaches `FAILED` or `NOT_FOUND`.
@@ -311,13 +307,11 @@ Use `max_concurrent` to change the limit.
 ```python
 # At most 8 jobs run at one time
 batch = train.run_async_map(configs, max_concurrent=8)
-
 ```
 
 ```python
 # Submit every job at once (no limit)
 batch = train.run_async_map(configs, max_concurrent=None)
-
 ```
 
 * **Default `64`:** Kinetic starts a new job each time an active job ends.
@@ -352,7 +346,6 @@ batch = train.run_async_map(
   fail_fast=True,
   cancel_running_on_fail=True,
 )
-
 ```
 
 A "failure" here is either a submission failure (when the call raises) or a runtime failure: a remote job reaching `FAILED` or `NOT_FOUND` status after all of its attempts.
@@ -398,7 +391,6 @@ results = batch.results(cleanup=False)  # keep the child handles
 batch = kinetic.attach_batch("grp-a1b2c3d4", poll_timeout=60)
 results = batch.results(cleanup=False)
 batch.cleanup()  # when you are done
-
 ```
 
 `attach_batch()` downloads the batch manifest from Cloud Storage and
@@ -458,7 +450,6 @@ It maps the child index to the job ID from the manifest:
 batch = kinetic.attach_batch("grp-a1b2c3d4")
 print(batch.unavailable_children)
 # {0: 'job-1a2b3c4d', 1: 'job-5e6f7a8b'}
-
 ```
 
 A `None` slot that does not appear in `unavailable_children` represents an
